@@ -1,8 +1,9 @@
 import AppKit
 import LightsCore
 
-/// Follows the terminal tab you last focused. Switching to another app keeps that tab;
-/// clicking into a different tab or window switches to it.
+/// Follows the terminal tab you last focused, or VS Code when that was last in front.
+/// Switching to any other app keeps what was followed; clicking into a different tab,
+/// window or editor switches to it.
 @MainActor
 final class FocusTracker {
     /// Terminals that report the focused tab's tty over AppleScript.
@@ -11,6 +12,15 @@ final class FocusTracker {
             #"tell application id "com.apple.Terminal" to tty of selected tab of front window"#,
         "com.googlecode.iterm2":
             #"tell application id "com.googlecode.iterm2" to tty of current session of current window"#,
+    ]
+
+    /// VS Code and forks. Their terminals set TERM_PROGRAM=vscode, which the hook reports.
+    static let editors: Set<String> = [
+        "com.microsoft.VSCode",
+        "com.microsoft.VSCodeInsiders",
+        "com.todesktop.230313mzl4w4u92",   // Cursor
+        "com.exafunction.windsurf",
+        "com.vscodium",
     ]
 
     private let queue = DispatchQueue(label: "lights.focus")
@@ -37,6 +47,12 @@ final class FocusTracker {
     }
 
     private func checkFocus() {
+        if let front = NSWorkspace.shared.frontmostApplication?.bundleIdentifier,
+           Self.editors.contains(front) {
+            hasFollowed = true
+            model.follow(.editor)
+            return
+        }
         guard !isQuerying, Date() >= pausedUntil, let bundle = terminalToAsk() else { return }
         isQuerying = true
         let script = Self.scripts[bundle] ?? ""
@@ -52,7 +68,7 @@ final class FocusTracker {
                 }
                 self.failures = 0
                 self.hasFollowed = true
-                self.model.follow(String(tty.dropFirst("/dev/".count)))
+                self.model.follow(.tab(String(tty.dropFirst("/dev/".count))))
             }
         }
     }

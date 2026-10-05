@@ -139,8 +139,30 @@ final class RemoteMachines: ObservableObject {
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.hosts.forEach(self.startTunnel)
+                self.refreshInstalls()
             }
         }
+    }
+
+    /// Re-runs the install on each machine so its hook script matches this build.
+    /// Unreachable machines are skipped; their tunnels keep retrying on their own.
+    private func refreshInstalls() {
+        guard let token = try? LocalFiles.ensureToken() else { return }
+        let authLine = LocalFiles.authLine(token)
+        for host in hosts {
+            queue.async { [weak self] in
+                guard let fresh = try? Self.install(on: host.alias, authLine: authLine) else { return }
+                DispatchQueue.main.async { self?.portChanged(host, to: fresh) }
+            }
+        }
+    }
+
+    /// The machine picked a new port (its ~/.lights/port was deleted): follow it.
+    private func portChanged(_ host: RemoteHost, to fresh: RemoteHost) {
+        guard fresh.port != host.port, hosts.contains(host) else { return }
+        hosts = hosts.map { $0 == host ? fresh : $0 }
+        save()
+        startTunnel(fresh)
     }
 
     func stopAll() {

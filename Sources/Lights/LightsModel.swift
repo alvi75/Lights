@@ -11,10 +11,10 @@ final class LightsModel {
     static let shared = LightsModel()
 
     private var store = SessionStore()
-    private(set) var followedTab: String?
+    private(set) var following: Follow?
     private var published: SessionState??
 
-    var displayed: SessionState? { store.displayed(following: followedTab) }
+    var displayed: SessionState? { store.displayed(following: following) }
     var trackedTabs: Set<String> { store.tabs }
 
     func receive(_ signal: Signal, tab: String) {
@@ -22,9 +22,9 @@ final class LightsModel {
         publish()
     }
 
-    func follow(_ tab: String) {
-        guard tab != followedTab else { return }
-        followedTab = tab
+    func follow(_ target: Follow) {
+        guard target != following else { return }
+        following = target
         publish()
     }
 

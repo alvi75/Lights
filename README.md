@@ -30,7 +30,9 @@ Lights is a small macOS menu-bar app that shows a floating traffic light for the
 | 🟢 Green | Done |
 | ⚫ Off | No AI session in the tab you're following |
 
-The light follows the Terminal.app or iTerm2 tab you last clicked into. Send a prompt, minimize the window or switch to your browser, and the light keeps showing that tab. Click into another tab and it switches. With other terminals (Ghostty, VS Code, Warp) it can't tell tabs apart, so it shows the most urgent session.
+The light follows the Terminal.app or iTerm2 tab you last clicked into. Send a prompt, minimize the window or switch to your browser, and the light keeps showing that tab. Click into another tab and it switches.
+
+When VS Code (or Cursor, Windsurf, VSCodium) is in front, the light shows the sessions running in its terminals, on your Mac or over Remote-SSH. VS Code doesn't tell other apps which terminal panel is focused, so with several sessions there it shows the most urgent one. Other terminals (Ghostty, Warp) aren't tracked per tab; the light then shows the most urgent session overall.
 
 ### Supported tools
 
@@ -64,7 +66,7 @@ To have Claude Code running on a server light up the tab you ssh'd from:
 
 1. You need key-based login: `ssh <name> true` must work without a password prompt.
 2. In the Setup panel, type the name you use after `ssh` (an alias from `~/.ssh/config` works) and click **Add**.
-3. Open a new terminal tab, `ssh` in, and run `claude` as usual.
+3. Open a new terminal tab, `ssh` in, and run `claude` as usual. VS Code Remote-SSH windows work too, as long as the machine is added here.
 
 **Add** does three things:
 - **On the server:** installs `~/.lights/hook.sh` and the Claude Code hooks, and saves a backup of `~/.claude/settings.json` first.
@@ -115,6 +117,8 @@ The token stops other accounts on a shared server, and web pages in your browser
 
 - Pressing Esc doesn't fire a hook, so the light stays yellow until your next prompt in that tab.
 - tmux: hooks report the pane's tty, not the Terminal tab's, so tabs running tmux aren't followed.
+- In VS Code, all Claude sessions share one light (the most urgent wins).
+- After updating Lights, each SSH machine's hook script is refreshed the next time the app starts and can reach it.
 - One Mac per server account: adding the same server from a second Mac replaces the first Mac's token there.
 - The menu-bar icon doesn't show the color yet.
 - On a MacBook with a notch and a full menu bar, the menu-bar icon can be hidden. Right-click the floating window for the same menu.

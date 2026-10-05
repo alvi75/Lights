@@ -40,9 +40,9 @@ do {
     var store = SessionStore()
     store.apply(.set(.working), tab: "ttys001", at: t0)
     store.apply(.set(.done), tab: "ttys002", at: t0)
-    check(store.displayed(following: "ttys001") == .working, "follows the focused tab")
-    check(store.displayed(following: "ttys002") == .done, "switching tabs switches state")
-    check(store.displayed(following: "ttys009") == nil, "tab without a session shows off")
+    check(store.displayed(following: .tab("ttys001")) == .working, "follows the focused tab")
+    check(store.displayed(following: .tab("ttys002")) == .done, "switching tabs switches state")
+    check(store.displayed(following: .tab("ttys009")) == nil, "tab without a session shows off")
 
     store.apply(.set(.needsYou), tab: "ttys002", at: t0)
     check(store.displayed(following: nil) == .needsYou, "no followed tab shows the most urgent")
@@ -56,9 +56,25 @@ do {
     check(store.state(of: "ttys002") == nil, "session end removes the tab")
 
     store.apply(.set(.done), tab: SessionStore.unknownTab, at: t0)
-    check(store.displayed(following: "ttys009") == .done, "tab without its own report falls back to tabless reports")
+    check(store.displayed(following: .tab("ttys009")) == .done, "tab without its own report falls back to tabless reports")
     store.retain(liveTabs: [])
     check(store.tabs == [SessionStore.unknownTab], "closed tabs dropped, unknown bucket kept")
+}
+
+do {
+    let t0 = Date()
+    var store = SessionStore()
+    store.apply(.set(.done), tab: "ttys001", at: t0)
+    store.apply(.set(.working), tab: "vscodepts76devbox", at: t0)
+    store.apply(.set(.needsYou), tab: "vscodepts136devbox", at: t0)
+    check(store.displayed(following: .editor) == .needsYou, "editor shows its most urgent session")
+    check(store.displayed(following: .tab("ttys001")) == .done, "terminal tab ignores editor sessions")
+    store.retain(liveTabs: [])
+    check(store.state(of: "vscodepts76devbox") == .working, "editor sessions survive tab pruning")
+    check(store.state(of: "ttys001") == nil, "closed terminal tab pruned")
+    store.apply(.end, tab: "vscodepts136devbox", at: t0)
+    store.apply(.end, tab: "vscodepts76devbox", at: t0)
+    check(store.displayed(following: .editor) == nil, "editor with no sessions shows off")
 }
 
 // MARK: - Routes

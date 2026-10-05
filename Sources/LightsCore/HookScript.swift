@@ -21,25 +21,31 @@ public enum HookScript {
     dir="$HOME/.lights"
     [ -r "$dir/auth" ] || exit 0
 
-    if [ -f "$dir/port" ]; then
-      # SSH machine: the Lights app tunnels this port back to the Mac, and the
-      # Mac's terminal tab comes along in LC_LIGHTS_TAB.
-      port=$(cat "$dir/port")
-      tab=${LC_LIGHTS_TAB:-}
-    else
-      port=9876
-      # Hooks run detached from the terminal, so walk up to the process that owns the tty.
-      tab=""
+    # tty of the nearest ancestor that has one; hooks run detached from the terminal.
+    find_tty() {
       p=$$
       while [ "${p:-0}" -gt 1 ]; do
         t=$(ps -o tty= -p "$p" 2>/dev/null | tr -d ' ')
-        case $t in ttys*) tab=$t; break ;; esac
+        case $t in ttys*|pts/*) echo "$t"; return ;; esac
         p=$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ')
       done
+    }
+
+    port=9876
+    [ -f "$dir/port" ] && port=$(cat "$dir/port")
+
+    if [ "${TERM_PROGRAM:-}" = vscode ]; then
+      # VS Code-style editor terminal, here or over Remote-SSH: shown while the editor is in front.
+      tab="vscode$(find_tty)$(hostname -s 2>/dev/null)"
+    elif [ -f "$dir/port" ]; then
+      # SSH machine: the Lights app tunnels the port back to the Mac, and the
+      # Mac's terminal tab comes along in LC_LIGHTS_TAB.
+      tab=${LC_LIGHTS_TAB:-}
+    else
+      tab=$(find_tty)
     fi
-    case $port in ''|*[!0-9]*) exit 0 ;; esac
+    tab=$(printf '%s' "$tab" | tr -cd 'A-Za-z0-9' | cut -c1-32)
     case $state in ''|*[!a-z]*) exit 0 ;; esac
-    case $tab in *[!A-Za-z0-9]*) tab="" ;; esac
 
     curl -q -gs --noproxy '*' --max-time 1 -H @"$dir/auth" \
       "http://127.0.0.1:$port/state?s=$state&tab=$tab" >/dev/null 2>&1
