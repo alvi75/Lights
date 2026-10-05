@@ -119,6 +119,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         NSApp.activate(ignoringOtherApps: true)
 
         NotificationCenter.default.addObserver(
+            forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            self?.keepWindowOnScreen()
+        }
+        NotificationCenter.default.addObserver(
             forName: .lightsResize, object: nil, queue: .main
         ) { [weak self] note in
             self?.applyResize(note)
@@ -209,6 +214,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         panel.delegate = self
         panel.makeKeyAndOrderFront(nil)
         setupWindow = panel
+    }
+
+    /// After a display is unplugged the window can be left where that screen was.
+    /// Put it back in the top-right corner of the main screen.
+    private func keepWindowOnScreen() {
+        guard let win = window else { return }
+        let frame = win.frame
+        let visible = NSScreen.screens.contains { $0.visibleFrame.intersects(frame) }
+        guard !visible, let screen = (NSScreen.main ?? NSScreen.screens.first)?.visibleFrame else { return }
+        win.setFrameOrigin(NSPoint(x: screen.maxX - frame.width - 24,
+                                   y: screen.maxY - frame.height - 24))
     }
 
     private func applyResize(_ note: Notification) {
