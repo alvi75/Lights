@@ -1,11 +1,12 @@
 import Foundation
+import LightsCore
 
 final class GooseIntegration: ToolIntegration {
     let id = "goose"
     let displayName = "Goose"
     let supportLevel: SupportLevel = .comingSoon
 
-    var statusBlurb: String {
+    func blurb(for status: InstallStatus) -> String {
         isCommandAvailable("goose")
             ? "Installed — hooks API still being researched (v2)"
             : "Not installed"
@@ -24,7 +25,7 @@ final class OpenCodeIntegration: ToolIntegration {
     let displayName = "OpenCode"
     let supportLevel: SupportLevel = .notSupported
 
-    var statusBlurb: String {
+    func blurb(for status: InstallStatus) -> String {
         isCommandAvailable("opencode")
             ? "Installed — OpenCode has no event hooks"
             : "Not installed"

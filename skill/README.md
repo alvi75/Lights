@@ -1,46 +1,33 @@
 # lights-hooks
 
-Claude Code skill that wires the [Lights](https://github.com/fengyiqicoder/Lights)
-macOS traffic-light app into `~/.claude/settings.json` so Claude Code's
-lifecycle events drive the lights' color.
+Claude Code skill that helps connect the [Lights](https://github.com/alvi75/Lights)
+macOS traffic-light app to Claude Code.
 
 ## Install
 
 ```bash
-npx skillsadd fengyiqicoder/lights-hooks
+mkdir -p ~/.claude/skills && cp -r skill ~/.claude/skills/lights-hooks
 ```
 
-Then in Claude Code, ask: *"set up lights hooks"* — the skill activates
-on description match and walks Claude through the JSON merge.
+Then in Claude Code, ask: *"set up lights hooks"*.
 
 ## Prerequisites
 
-- macOS with Lights.app running (`http://127.0.0.1:9876` must respond)
+- macOS with Lights.app running (`curl 127.0.0.1:9876/health` answers `lights ok`)
 - Claude Code installed
 
-## What it does
+## What gets installed
 
-Adds these hooks to `~/.claude/settings.json` (preserving any existing
-hooks you have):
+The app's Setup panel adds these hooks to `~/.claude/settings.json`, keeping
+your own hooks. Each one runs `~/.lights/hook.sh <state>`.
 
-| Claude Code event | → endpoint | Light |
+| Claude Code event | State | Light |
 |---|---|---|
-| UserPromptSubmit | `/executing` | 🔴 red |
-| Notification | `/permission` | 🟡 yellow |
-| Stop | `/idle` | 🟢 green |
-| PreToolUse on AskUserQuestion/ExitPlanMode | `/permission` | 🟡 yellow |
-| PostToolUse on AskUserQuestion/ExitPlanMode | `/executing` | 🔴 red |
+| SessionStart, Stop | `idle` | 🟢 green |
+| UserPromptSubmit, PostToolUse (any tool) | `executing` | 🟡 yellow |
+| Notification (permission_prompt, elicitation_dialog) | `permission` | 🔴 red |
+| PreToolUse on AskUserQuestion / ExitPlanMode | `permission` | 🔴 red |
+| StopFailure (usage limit, billing, auth, server errors) | `error` | 🔴 red |
+| SessionEnd | `end` | off |
 
-A backup of your existing `settings.json` is saved as
-`settings.json.bak-lights-YYYYMMDD-HHMMSS` before any change.
-
-## Uninstall
-
-Tell Claude: *"uninstall lights hooks"* — the skill removes only the
-9876-port curl entries; everything else stays intact.
-
-## See also
-
-- [Lights.app source](https://github.com/fengyiqicoder/Lights) — built-in
-  Setup panel does the same install with one click via the GUI
-- [skills.sh](https://skills.sh) — the Claude Code skills directory
+A backup is saved as `settings.json.bak-lights-YYYYMMDD-HHMMSS` before any change.

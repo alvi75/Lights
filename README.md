@@ -11,29 +11,26 @@
 
 [English](#english) · [中文](#中文)
 
-### ⬇️ [Download Lights v0.1.0 for macOS](https://github.com/fengyiqicoder/Lights/releases/latest/download/Lights-v0.1.0.zip)
-
-*macOS 14+ · Developer-ID signed · Notarized by Apple · ~1.5 MB*
+*macOS 14+ · build from source*
 
 </div>
 
-> **First launch:** Signed with Developer ID and notarized by Apple, so macOS will just show the standard *"This app was downloaded from the Internet, are you sure you want to open it?"* dialog. Click **Open**. No Privacy & Security workaround needed.
->
-> 第一次打开：已经过 Apple 公证（notarized），系统只会弹标准的"此 App 是从互联网下载的，确定要打开吗？"。点 **打开** 即可，不需要去隐私与安全性里折腾。
+> This is a fork of [fengyiqicoder/Lights](https://github.com/fengyiqicoder/Lights). It adds per-tab tracking, SSH machines, a token on the local server, and fixes to the Setup panel. The colors mean something different from upstream: red is "needs you", yellow is "working".
 
 ---
 
 ## English
 
-Lights is a tiny macOS menu-bar app that shows a floating traffic light reflecting what your AI coding assistant is doing right now:
+Lights is a small macOS menu-bar app that shows a floating traffic light for the AI session in the terminal tab you're working in:
 
 | Light | Meaning |
 |---|---|
-| 🔴 Red | The assistant is executing — model is generating, tools running |
-| 🟡 Yellow | The assistant needs your input — permission prompt, AskUserQuestion, ExitPlanMode |
-| 🟢 Green | Idle / response complete |
+| 🔴 Red | Needs you: a permission prompt, a question, plan approval, or the turn stopped on an error (usage limit, out of credit, auth failure, server overloaded) |
+| 🟡 Yellow | Working |
+| 🟢 Green | Done |
+| ⚫ Off | No AI session in the tab you're following |
 
-It listens on `http://127.0.0.1:9876` and your AI tool fires `curl` from lifecycle hooks. Glanceable. No context switch.
+The light follows the Terminal.app or iTerm2 tab you last clicked into. Send a prompt, minimize the window or switch to your browser, and the light keeps showing that tab. Click into another tab and it switches. With other terminals (Ghostty, VS Code, Warp) it can't tell tabs apart, so it shows the most urgent session.
 
 ### Supported tools
 
@@ -41,7 +38,8 @@ It listens on `http://127.0.0.1:9876` and your AI tool fires `curl` from lifecyc
 |---|---|---|
 | Claude Code | ✅ Full event hooks | `~/.claude/settings.json` |
 | Codex CLI | ✅ Full event hooks | `~/.codex/hooks.json` + `features.hooks = true` in `config.toml` |
-| Goose | ⏳ Placeholder — researching | — |
+| Claude Code over SSH | ✅ | Setup panel → *SSH machines* |
+| Goose | ⏳ Placeholder | — |
 | OpenCode | ❌ No event hooks | — |
 
 ### Install
@@ -49,99 +47,116 @@ It listens on `http://127.0.0.1:9876` and your AI tool fires `curl` from lifecyc
 Requires macOS 14+ and Swift 5.9+ (Xcode Command Line Tools is enough).
 
 ```bash
-git clone https://github.com/fengyiqicoder/Lights.git
+git clone https://github.com/alvi75/Lights.git
 cd Lights
 ./build-app.sh
-open Lights.app
+mv Lights.app /Applications/
+open /Applications/Lights.app
 ```
 
-On first launch a Setup panel pops up. For each supported tool detected on your system, click **[Install]** — Lights writes the hooks directly to that tool's config (backing up first).
+On first launch the Setup panel opens. Click **Install** next to each tool. Lights backs up the config file, then adds its hooks and leaves your own hooks alone. If you used an older Lights, the button says **Update**.
 
-You can also use the [skills.sh](https://skills.sh) distribution if you prefer Claude itself walk you through:
+The first time the light tries to follow a tab, macOS asks whether Lights may control Terminal (or iTerm2). Click **OK**. If you said no, turn it back on under System Settings → Privacy & Security → Automation → Lights.
 
-```bash
-npx skillsadd fengyiqicoder/lights-hooks
-```
+### SSH machines
 
-Then in Claude Code: *"set up lights hooks"*.
+To have Claude Code running on a server light up the tab you ssh'd from:
+
+1. You need key-based login: `ssh <name> true` must work without a password prompt.
+2. In the Setup panel, type the name you use after `ssh` (an alias from `~/.ssh/config` works) and click **Add**.
+3. Open a new terminal tab, `ssh` in, and run `claude` as usual.
+
+**Add** does three things:
+- **On the server:** installs `~/.lights/hook.sh` and the Claude Code hooks, and saves a backup of `~/.claude/settings.json` first.
+- **On your Mac:** adds one line to `~/.zshrc` (and to `~/.bashrc` / `~/.bash_profile` if they exist). That line exports `LC_LIGHTS_TAB` with your tab's tty name.
+- **Tunnel:** keeps a background `ssh -N -R` tunnel to the server. It reconnects after sleep or network loss.
+
+macOS `ssh` forwards `LC_*` variables by default, and most Linux servers accept them (`AcceptEnv LANG LC_*`). If a server doesn't accept them, the light still works, but it can't tell that server's sessions apart by tab.
 
 ### Usage
 
 | Action | How |
 |---|---|
 | Show / hide the floating window | Menu-bar icon → *Show / Hide Window* |
-| Open Setup | Menu-bar icon → *Setup Hooks…* — or right-click the floating window |
-| Change size | Right-click the floating window → *Size ▸* (Small / Medium / Large) |
-| Manual override | Click any single light to lock it on, or use the HTTP endpoints below |
-| Move the window | Drag the dark housing background |
+| Open Setup | Menu-bar icon → *Setup Hooks…*, or right-click the floating window |
+| Change size | Right-click the floating window → *Size ▸* |
+| Manual override | Click a light to lock it on until the next change |
+| Move the window | Drag the dark housing |
 | Quit | Menu-bar icon → *Quit Lights* |
 
 ### HTTP control
 
+The server listens on `127.0.0.1:9876`. Every route except `/health` needs the token in `~/.lights/auth`. That file is readable only by you, and Lights creates it on first launch.
+
 ```bash
-curl localhost:9876/executing   # → red
-curl localhost:9876/permission  # → yellow
-curl localhost:9876/idle        # → green
-curl localhost:9876/off         # → all off
-curl localhost:9876/status      # → query current state
-curl localhost:9876/snapshot    # → write a PNG of the current window to /tmp, returns path
+curl -H @$HOME/.lights/auth localhost:9876/status                       # needs-you | working | done | off
+curl -H @$HOME/.lights/auth "localhost:9876/state?s=executing&tab=ttys002" # set a tab's state
+curl -H @$HOME/.lights/auth localhost:9876/permission                   # old style, no tab
+curl localhost:9876/health                                                 # no token needed
 ```
+
+States: `executing` (working), `permission` and `error` (needs you), `idle` (done), `end` (forget the session).
 
 ### How it works
 
 ```
-  Claude Code / Codex CLI
-        │ (lifecycle event)
+  Claude Code / Codex hook ──▶ ~/.lights/hook.sh <state>
+        │  finds the tab's tty (or LC_LIGHTS_TAB on a server)
         ▼
-  hook command:  curl http://127.0.0.1:9876/<state>
-        │
+  curl 127.0.0.1:9876/state?s=<state>&tab=<tty>   (+ token header)
+        │  on a server, 127.0.0.1:<port> tunnels back to the Mac
         ▼
-  Lights HTTP server  ──▶  SwiftUI state  ──▶  floating light updates
+  Lights: state per tab ──▶ tab you're following ──▶ light
 ```
 
-The Setup panel reads each tool's config, detects whether Lights hooks are present, and writes/removes them via an idempotent JSON merge engine that preserves all your other hooks. A timestamped backup is saved beside the config file before every write.
+The token stops other accounts on a shared server, and web pages in your browser, from changing your light. It is sent from a file with `curl -H @file`, so it never appears in `ps`.
 
 ### Known limitations
 
-- On MacBook Pro with notch + many menu-bar items already, the new status-item icon may be pushed behind the notch and become invisible. Right-clicking the floating window provides the same menu — functionality is not lost.
-- Live status-color mirroring in the menu-bar icon is not yet implemented (it stays as a neutral 3-dot template).
+- Pressing Esc doesn't fire a hook, so the light stays yellow until your next prompt in that tab.
+- tmux: hooks report the pane's tty, not the Terminal tab's, so tabs running tmux aren't followed.
+- One Mac per server account: adding the same server from a second Mac replaces the first Mac's token there.
+- The menu-bar icon doesn't show the color yet.
+- On a MacBook with a notch and a full menu bar, the menu-bar icon can be hidden. Right-click the floating window for the same menu.
 
 ### Project layout
 
 ```
+Sources/LightsCore/                session states, routes, hook script, JSON merge, remote setup
 Sources/Lights/
   main.swift                       app delegate, content view, lights window
   StatusServer.swift               HTTP listener on 9876
+  LightsModel.swift                per-tab state → what the light shows
+  FocusTracker.swift               follows the focused Terminal / iTerm2 tab
+  RemoteMachines.swift             SSH install + background tunnels
+  RemoteSection.swift              "SSH machines" part of Setup
   MenuBarController.swift          NSStatusItem + menu
-  ToolIntegration.swift            protocol + types
-  JSONHookMerger.swift             shared idempotent JSON merge engine
   ClaudeCodeIntegration.swift      ~/.claude/settings.json driver
   CodexIntegration.swift           ~/.codex/ driver (hooks.json + config.toml)
-  PlaceholderIntegrations.swift    Goose, OpenCode stubs
-  SetupView.swift                  SwiftUI panel
-  SetupManager.swift               observable state + first-launch flag
+  SetupView.swift, SetupManager.swift
+Sources/LightsSelfTest/            checks for LightsCore
 tools/render-icon.swift            Core Graphics icon generator
 skill/SKILL.md                     skills.sh distributable skill
-docs/superpowers/specs/            design notes
 build-app.sh                       build → .app bundle
 ```
 
 ### Development
 
 ```bash
-swift build                                     # CLI only
-./build-app.sh                                  # .app bundle (re-renders icon)
-swift tools/render-icon.swift                   # only regenerate PNGs
-iconutil -c icns AppIcon.iconset -o Resources/AppIcon.icns
+swift build                     # everything
+swift run lights-selftest       # checks (works without Xcode)
+./build-app.sh                  # .app bundle (re-renders icon)
 ```
 
 ### License
 
-MIT. See [LICENSE](LICENSE).
+MIT. See [LICENSE](LICENSE). Original work © its author; changes in this fork are under the same license.
 
 ---
 
 ## 中文
+
+> 中文部分描述的是上游 v0.1 的行为。本 fork 的颜色含义不同（红 = 需要你，黄 = 运行中，绿 = 完成），并新增了按标签页跟随和 SSH 支持，详见上方英文说明。
 
 Lights 是一个 macOS 菜单栏小工具：屏幕角落悬浮一盏交通灯，实时显示 AI 编程助手的状态。
 

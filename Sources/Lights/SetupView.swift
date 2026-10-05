@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import LightsCore
 
 struct SetupView: View {
     @ObservedObject var mgr: SetupManager = .shared
@@ -11,10 +12,11 @@ struct SetupView: View {
             Divider()
             intro
             toolList
+            RemoteSection()
             Spacer(minLength: 0)
             footer
         }
-        .frame(width: 500, height: 380)
+        .frame(width: 500, height: 600)
         .onAppear { mgr.refreshAll() }
     }
 
@@ -30,7 +32,7 @@ struct SetupView: View {
     }
 
     private var intro: some View {
-        Text("Connect Lights to your AI coding tools. Lights must be running for hooks to reach it.")
+        Text("Red: needs you · Yellow: working · Green: done. The light follows the Terminal or iTerm2 tab you last clicked into.")
             .font(.callout)
             .foregroundStyle(.secondary)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -75,7 +77,7 @@ private struct ToolRow: View {
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(state.tool.displayName).font(.body.weight(.medium))
-                Text(state.tool.statusBlurb)
+                Text(state.tool.blurb(for: state.status))
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
@@ -101,7 +103,7 @@ private struct ToolRow: View {
     private var badge: some View {
         switch state.status {
         case .configured:             dot(.green)
-        case .toolPresentHookMissing: dot(.orange)
+        case .toolPresentHookMissing, .outdated: dot(.orange)
         case .toolNotInstalled:       dot(.gray)
         case .unknown:                dot(.red)
         }
@@ -122,6 +124,9 @@ private struct ToolRow: View {
             Text("—").font(.caption).foregroundStyle(.tertiary)
         case (.events, .toolPresentHookMissing):
             Button("Install") { mgr.install(state) }
+                .buttonStyle(.borderedProminent)
+        case (.events, .outdated):
+            Button("Update") { mgr.install(state) }
                 .buttonStyle(.borderedProminent)
         case (.events, .configured):
             Button("Uninstall") { mgr.uninstall(state) }

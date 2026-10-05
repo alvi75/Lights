@@ -1,116 +1,60 @@
 ---
 name: lights-hooks
 description: |
-  Install Lights traffic-light status hooks into Claude Code's settings.json.
-  Lights is a macOS menu-bar app that shows AI activity as a floating
-  traffic light (red=executing, yellow=needs input, green=idle).
+  Connect the Lights traffic-light app to Claude Code. Lights is a macOS
+  menu-bar app that shows the AI session in the focused terminal tab as a
+  floating traffic light (red = needs you, yellow = working, green = done).
   Use this skill when the user mentions Lights, asks how to connect Lights
-  to Claude Code, says "set up lights hooks", "install lights skill", or
-  installs Lights and asks how to wire it up.
+  to Claude Code, says "set up lights hooks", or installed Lights and the
+  light doesn't change.
 ---
 
-# Install Lights Hooks for Claude Code
+# Connect Lights to Claude Code
 
-Lights listens on `http://127.0.0.1:9876` for state signals. When configured
-correctly, Claude Code fires curl requests on lifecycle events and the
-floating traffic light reflects current activity.
+Lights installs its own hooks from its Setup panel. This skill checks that
+the app is running and walks the user through that panel. Do not write
+hooks by hand: the server rejects requests without the token that the app
+creates in `~/.lights/auth`.
 
-## Step 1 — Verify Lights is running
-
-Run:
-
-```bash
-curl -s --max-time 1 http://127.0.0.1:9876/status
-```
-
-Expected output: `idle`, `executing`, `permission`, or `off`.
-
-If the curl fails or hangs:
-- Tell the user: *"Lights app isn't running. Launch /Applications/Lights.app
-  (or `open Lights.app` from the source repo) and then re-invoke this skill."*
-- **Stop.** Do not proceed with config changes.
-
-## Step 2 — Back up settings.json
+## Step 1 — Check that Lights is running
 
 ```bash
-TS=$(date +%Y%m%d-%H%M%S)
-cp ~/.claude/settings.json ~/.claude/settings.json.bak-lights-$TS
+curl -s --max-time 1 http://127.0.0.1:9876/health
 ```
 
-## Step 3 — Merge the hooks
+The expected output is `lights ok`. If nothing answers, tell the user to open
+`/Applications/Lights.app` (or build it from the repo with `./build-app.sh`),
+then run this skill again. Stop here until it answers.
 
-Read `~/.claude/settings.json` as JSON. Ensure the top-level `hooks` key
-exists (create as `{}` if missing). For each of the five events below,
-**add** a new hook entry — preserve any existing hooks the user has.
+## Step 2 — Install from the Setup panel
 
-### Idempotency rule
+Tell the user to right-click the floating light, choose **Setup Hooks…** and
+click **Install** next to Claude Code (**Update** if it says older hooks).
 
-Before adding each hook, scan all existing commands in the target event
-array. If any command already contains `9876/<endpoint>` for that
-endpoint, **skip** — do not duplicate.
-
-### Hooks to add
-
-All commands share these properties:
-- `type: "command"`
-- `timeout: 2000`
-- Stream output to `/dev/null`, suffix `|| true` so a missing Lights never
-  blocks Claude Code
-
-| Event | Matcher | Endpoint |
-|---|---|---|
-| `UserPromptSubmit` | *(none)* | `/executing` |
-| `Notification` | *(none)* | `/permission` |
-| `Stop` | *(none)* | `/idle` |
-| `PreToolUse` | `AskUserQuestion\|ExitPlanMode` | `/permission` |
-| `PostToolUse` | `AskUserQuestion\|ExitPlanMode` | `/executing` |
-
-Command template:
-```
-curl -s --max-time 1 http://127.0.0.1:9876/<endpoint> >/dev/null 2>&1 || true
-```
-
-### Merge structure
-
-Each event in `hooks` is an array of entries. Each entry has:
-- optional `matcher` (regex)
-- `hooks`: array of `{type, command, timeout}` objects
-
-When adding to an event:
-1. If an entry with the same `matcher` already exists → append the new hook
-   to that entry's `hooks` array.
-2. Otherwise → create a new entry with the matcher + the single hook.
-
-## Step 4 — Write the JSON back
-
-Pretty-print with 2-space indent. Don't sort other keys the user has set.
-
-## Step 5 — Verify
+## Step 3 — Verify
 
 ```bash
-curl -s http://127.0.0.1:9876/status
+grep -c '.lights/hook.sh' ~/.claude/settings.json
+test -x ~/.lights/hook.sh && test -r ~/.lights/auth && echo ready
+curl -s -H @$HOME/.lights/auth http://127.0.0.1:9876/status
 ```
 
-The user can then:
-- Type any prompt in Claude Code → red light
-- Wait for a permission prompt → yellow
-- See response complete → green
+The first command should print 8, the second `ready`. The status shows the
+followed tab: `working` while Claude is busy, `done` after a reply,
+`needs-you` at a permission prompt.
+
+If the status stays `off` in the tab the user is working in, check System
+Settings → Privacy & Security → Automation → Lights → Terminal (or iTerm2).
+Lights needs that permission to see which tab is in front.
+
+## SSH machines
+
+For Claude Code running on a server, the user adds the server in the Setup
+panel under **SSH machines**. Key-based login must work first
+(`ssh <name> true` without a prompt). They should open a new terminal tab
+afterwards so the `LC_LIGHTS_TAB` line in `~/.zshrc` takes effect.
 
 ## Uninstall
 
-If the user asks to remove Lights hooks, scan every hook command in
-`settings.json` and delete the ones containing any of:
-- `9876/executing`
-- `9876/permission`
-- `9876/idle`
-- `9876/off`
-
-Drop entries whose `hooks` array becomes empty. Leave everything else
-untouched. Back up first as in Step 2.
-
-## Alternative: Lights app itself
-
-If the user has Lights.app installed, they can also use its built-in
-Setup panel (right-click the floating traffic light → "Setup Hooks…")
-which does the same merge with a single click. This skill exists for
-users who don't run the GUI.
+Click **Uninstall** in the Setup panel. It removes only the Lights hooks
+and backs up the file first.

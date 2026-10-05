@@ -21,6 +21,7 @@ echo "→ Building app bundle (ad-hoc sign first)..."
 
 echo "→ Re-signing with Developer ID (hardened runtime)..."
 codesign --force --deep --options runtime --timestamp \
+    --entitlements Resources/Lights.entitlements \
     --sign "$IDENTITY" "$APP"
 
 echo "→ Verifying signature..."

@@ -1,4 +1,5 @@
 import Foundation
+import LightsCore
 
 final class CodexIntegration: ToolIntegration {
     let id = "codex-cli"
@@ -9,57 +10,23 @@ final class CodexIntegration: ToolIntegration {
     var configPath: String { "\(NSHomeDirectory())/.codex/config.toml" }
     var dir:        String { "\(NSHomeDirectory())/.codex" }
 
-    var statusBlurb: String {
-        switch detectStatus() {
-        case .toolNotInstalled:        return "Not installed"
-        case .toolPresentHookMissing:  return "Installed — Lights hook missing"
-        case .configured:              return "Hooks configured ✓"
-        case .unknown(let why):        return "Error: \(why)"
-        }
-    }
-
     func detectStatus() -> InstallStatus {
-        let fm = FileManager.default
-        let hasDir = fm.fileExists(atPath: dir)
-        let hasCLI = isCommandAvailable("codex")
-
-        guard hasDir || hasCLI else { return .toolNotInstalled }
-
-        if fm.fileExists(atPath: hooksPath) {
-            do {
-                let dict = try JSONHookMerger.readJSON(hooksPath)
-                if JSONHookMerger.containsAnyHook(dict,
-                    fragments: JSONHookMerger.lightsCommandFragments) {
-                    return .configured
-                }
-            } catch {
-                return .unknown(error.localizedDescription)
-            }
-        }
-        return .toolPresentHookMissing
+        let hasDir = FileManager.default.fileExists(atPath: dir)
+        guard hasDir || isCommandAvailable("codex") else { return .toolNotInstalled }
+        return hookStatus(path: hooksPath, specs: JSONHookMerger.codexHookSpecs)
     }
 
     func install() throws {
-        let fm = FileManager.default
-        if !fm.fileExists(atPath: dir) {
-            try fm.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        try LocalFiles.installHookScript()
+        try JSONHookMerger.update(hooksPath) {
+            JSONHookMerger.installing(JSONHookMerger.codexHookSpecs, into: $0)
         }
-        // 1. hooks.json — merge in our specs
-        _ = try JSONHookMerger.backup(hooksPath)
-        var dict = try JSONHookMerger.readJSON(hooksPath)
-        JSONHookMerger.merge(into: &dict, specs: JSONHookMerger.codexHookSpecs)
-        try JSONHookMerger.writeJSON(dict, to: hooksPath)
-
-        // 2. config.toml — ensure `features.hooks = true`
         try ensureFeaturesHooksEnabled()
     }
 
     func uninstall() throws {
-        _ = try JSONHookMerger.backup(hooksPath)
-        var dict = try JSONHookMerger.readJSON(hooksPath)
-        JSONHookMerger.removeMatching(&dict,
-            fragments: JSONHookMerger.lightsCommandFragments)
-        try JSONHookMerger.writeJSON(dict, to: hooksPath)
+        try JSONHookMerger.update(hooksPath, JSONHookMerger.uninstalling)
         // Don't touch features.hooks — user may need it for other tools.
     }
 

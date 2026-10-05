@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import LightsCore
 
 extension Notification.Name {
     static let lightsResize = Notification.Name("LightsResize")
@@ -66,15 +67,25 @@ func setupMainMenu(app: NSApplication) {
 final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var window: NSWindow!
     var setupWindow: NSPanel?
-    let statusServer = StatusServer()
+    private var statusServer: StatusServer?
     let menuBar = MenuBarController()
+    private var focusTracker: FocusTracker?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // LSUIElement=true in Info.plist already hides Dock.
         // Belt-and-suspenders for builds run without the bundle:
         NSApp.setActivationPolicy(.accessory)
-        statusServer.start()
+        // A child that exits before reading its stdin must not kill the app.
+        signal(SIGPIPE, SIG_IGN)
+        startServer()
         menuBar.install()
+        refreshHookScript()
+        MainActor.assumeIsolated {
+            let tracker = FocusTracker(model: .shared)
+            tracker.start()
+            focusTracker = tracker
+            RemoteMachines.shared.startAll()
+        }
 
         let storedRaw = UserDefaults.standard.string(forKey: "lightsSize") ?? LightsSize.large.rawValue
         let initialSize = LightsSize(rawValue: storedRaw) ?? .large
@@ -131,6 +142,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
     }
 
+    func applicationWillTerminate(_ notification: Notification) {
+        MainActor.assumeIsolated {
+            RemoteMachines.shared.stopAll()
+        }
+    }
+
+    private func startServer() {
+        do {
+            let server = StatusServer(token: try LocalFiles.ensureToken())
+            server.start()
+            statusServer = server
+        } catch {
+            NSLog("[Lights] could not create ~/.lights/auth, hooks can't reach the app: \(error)")
+        }
+    }
+
+    /// Keeps ~/.lights/hook.sh in step with this build once hooks are installed.
+    private func refreshHookScript() {
+        let path = "\(NSHomeDirectory())/\(HookScript.relativePath)"
+        guard FileManager.default.fileExists(atPath: path) else { return }
+        do {
+            try LocalFiles.installHookScript()
+        } catch {
+            NSLog("[Lights] could not update hook script: \(error)")
+        }
+    }
+
     private func toggleWindowVisibility() {
         guard let win = window else { return }
         if win.isVisible {
@@ -156,7 +194,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         })
         let hosting = NSHostingView(rootView: view)
         let panel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 500, height: 380),
+            contentRect: NSRect(x: 0, y: 0, width: 500, height: 600),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
@@ -211,11 +249,20 @@ final class FloatingWindow: NSWindow {
 
 // MARK: - Content
 
-enum Light: Hashable { case red, yellow, green }
+enum Bulb: Hashable {
+    case red, yellow, green
+
+    init(_ light: Light) {
+        switch light {
+        case .red:    self = .red
+        case .yellow: self = .yellow
+        case .green:  self = .green
+        }
+    }
+}
 
 struct ContentView: View {
-    @State private var active: Light? = .green
-    @State private var yellowStickyUntil: Date = .distantPast
+    @State private var active: Bulb? = nil
     @AppStorage("lightsSize") private var size: LightsSize = .large
 
     var body: some View {
@@ -248,9 +295,9 @@ struct ContentView: View {
             Divider()
             Button("Quit Lights") { NSApp.terminate(nil) }
         }
-        .onReceive(NotificationCenter.default.publisher(for: .lightsStateChange)) { note in
-            guard let raw = note.userInfo?["state"] as? String else { return }
-            handleSignal(raw)
+        .onReceive(NotificationCenter.default.publisher(for: .lightsDisplayChange)) { note in
+            guard let raw = note.userInfo?["light"] as? String else { return }
+            setActive(Light(rawValue: raw).map(Bulb.init))
         }
         .onReceive(NotificationCenter.default.publisher(for: .lightsRequestOff)) { _ in
             setActive(nil)
@@ -262,29 +309,6 @@ struct ContentView: View {
                 userInfo: ["width": dim.width, "height": dim.height]
             )
         }
-    }
-
-    private func handleSignal(_ raw: String) {
-        let target: Light?
-        switch raw {
-        case "executing":  target = .red
-        case "permission": target = .yellow
-        case "idle":       target = .green
-        case "off":        target = nil
-        default: return
-        }
-
-        // Yellow is sticky briefly — guards against true ms-scale races
-        // where /executing arrives right after /permission. Short enough
-        // that intentional transitions (e.g. PostToolUse after the user
-        // answers an AskUserQuestion) still take effect.
-        if active == .yellow, target == .red, Date() < yellowStickyUntil {
-            return
-        }
-        if target == .yellow {
-            yellowStickyUntil = Date().addingTimeInterval(0.2)
-        }
-        setActive(target)
     }
 
     private var housing: some View {
@@ -315,11 +339,11 @@ struct ContentView: View {
         }
     }
 
-    private func tap(_ light: Light) {
+    private func tap(_ light: Bulb) {
         setActive(active == light ? nil : light)
     }
 
-    private func setActive(_ light: Light?) {
+    private func setActive(_ light: Bulb?) {
         withAnimation(.spring(response: 0.28, dampingFraction: 0.7)) {
             active = light
         }

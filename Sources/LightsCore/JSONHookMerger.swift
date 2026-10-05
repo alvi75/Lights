@@ -1,48 +1,67 @@
 import Foundation
 
-struct HookSpec {
-    let event: String        // "UserPromptSubmit", "Notification", etc.
-    let matcher: String?     // "AskUserQuestion|ExitPlanMode", or nil
-    let command: String
-    let timeout: Int
+public struct HookSpec: Sendable {
+    public let event: String        // "UserPromptSubmit", "Notification", etc.
+    public let matcher: String?     // "AskUserQuestion|ExitPlanMode", or nil
+    public let command: String
+    public let timeout: Int         // seconds
 }
 
-enum JSONHookMerger {
+public enum JSONHookMerger {
 
-    // MARK: - Standard Lights hook specs
+    // MARK: - Lights hook specs
 
-    static let lightsHookSpecs: [HookSpec] = [
-        HookSpec(event: "UserPromptSubmit", matcher: nil,
-                 command: lightsCurl("executing"),  timeout: 2000),
-        HookSpec(event: "Notification",     matcher: nil,
-                 command: lightsCurl("permission"), timeout: 2000),
-        HookSpec(event: "Stop",             matcher: nil,
-                 command: lightsCurl("idle"),       timeout: 2000),
-        HookSpec(event: "PreToolUse",  matcher: "AskUserQuestion|ExitPlanMode",
-                 command: lightsCurl("permission"), timeout: 2000),
-        HookSpec(event: "PostToolUse", matcher: "AskUserQuestion|ExitPlanMode",
-                 command: lightsCurl("executing"),  timeout: 2000),
+    private static func spec(_ event: String, _ matcher: String?, _ signal: String) -> HookSpec {
+        HookSpec(event: event, matcher: matcher, command: HookScript.command(signal), timeout: 5)
+    }
+
+    public static let claudeHookSpecs: [HookSpec] = [
+        spec("SessionStart",     nil, "idle"),
+        spec("UserPromptSubmit", nil, "executing"),
+        spec("PreToolUse",       "AskUserQuestion|ExitPlanMode", "permission"),
+        // Any finished tool means work resumed, including after a permission was granted.
+        spec("PostToolUse",      "*", "executing"),
+        // Only prompts that need an answer; "idle_prompt" fires on a finished session.
+        spec("Notification",     "permission_prompt|elicitation_dialog", "permission"),
+        spec("Stop",             nil, "idle"),
+        // Rate limit, out of credit, auth failure and other API errors that end the turn.
+        spec("StopFailure",      nil, "error"),
+        spec("SessionEnd",       nil, "end"),
     ]
 
     /// Codex uses `PermissionRequest` instead of `Notification`.
-    static let codexHookSpecs: [HookSpec] = lightsHookSpecs.map { spec in
-        spec.event == "Notification"
-            ? HookSpec(event: "PermissionRequest", matcher: spec.matcher,
-                       command: spec.command, timeout: spec.timeout)
-            : spec
-    }
+    public static let codexHookSpecs: [HookSpec] = [
+        spec("UserPromptSubmit",  nil, "executing"),
+        spec("PreToolUse",        "AskUserQuestion|ExitPlanMode", "permission"),
+        spec("PostToolUse",       nil, "executing"),
+        spec("PermissionRequest", nil, "permission"),
+        spec("Stop",              nil, "idle"),
+    ]
 
-    static let lightsCommandFragments = [
+    public static let currentFragments = [HookScript.relativePath]
+
+    /// Commands written by Lights 0.1 (direct curl to the app).
+    public static let legacyFragments = [
         "9876/executing", "9876/permission", "9876/idle", "9876/off"
     ]
 
-    private static func lightsCurl(_ endpoint: String) -> String {
-        "curl -s --max-time 1 http://127.0.0.1:9876/\(endpoint) >/dev/null 2>&1 || true"
+    /// Removes any earlier Lights hooks, then adds the current ones.
+    public static func installing(_ specs: [HookSpec], into settings: [String: Any]) -> [String: Any] {
+        var result = settings
+        removeMatching(&result, fragments: currentFragments + legacyFragments)
+        merge(into: &result, specs: specs)
+        return result
+    }
+
+    public static func uninstalling(from settings: [String: Any]) -> [String: Any] {
+        var result = settings
+        removeMatching(&result, fragments: currentFragments + legacyFragments)
+        return result
     }
 
     // MARK: - File helpers
 
-    static func backup(_ path: String) throws -> String? {
+    public static func backup(_ path: String) throws -> String? {
         let fm = FileManager.default
         guard fm.fileExists(atPath: path) else { return nil }
         let f = DateFormatter()
@@ -50,29 +69,55 @@ enum JSONHookMerger {
         f.timeZone = TimeZone.current
         let stamp = f.string(from: Date())
         let bak = "\(path).bak-lights-\(stamp)"
+        if fm.fileExists(atPath: bak) { return bak }
         try fm.copyItem(atPath: path, toPath: bak)
         return bak
     }
 
-    static func readJSON(_ path: String) throws -> [String: Any] {
+    public static func readJSON(_ path: String) throws -> [String: Any] {
         let fm = FileManager.default
         guard fm.fileExists(atPath: path) else { return [:] }
         let data = try Data(contentsOf: URL(fileURLWithPath: path))
+        return try parseJSON(data, source: path)
+    }
+
+    public static func parseJSON(_ data: Data, source: String) throws -> [String: Any] {
         if data.isEmpty { return [:] }
         guard let dict = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            throw ToolIntegrationError.invalidJSON(path)
+            throw ToolIntegrationError.invalidJSON(source)
         }
         return dict
     }
 
-    static func writeJSON(_ dict: [String: Any], to path: String) throws {
+    public static func serialize(_ dict: [String: Any]) throws -> Data {
         let data = try JSONSerialization.data(
             withJSONObject: dict,
             options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
         )
         var s = String(data: data, encoding: .utf8) ?? ""
         if !s.hasSuffix("\n") { s += "\n" }
-        try s.write(toFile: path, atomically: true, encoding: .utf8)
+        return Data(s.utf8)
+    }
+
+    /// Writes only when the content changes, backing up the old file first.
+    /// Returns false when there was nothing to do.
+    @discardableResult
+    public static func update(_ path: String, _ change: ([String: Any]) -> [String: Any]) throws -> Bool {
+        let before = try readJSON(path)
+        let after = change(before)
+        let fm = FileManager.default
+        if fm.fileExists(atPath: path), try serialize(before) == serialize(after) {
+            return false
+        }
+        _ = try backup(path)
+        // Write through symlinks and keep the file's mode (settings can hold API keys).
+        let real = URL(fileURLWithPath: path).resolvingSymlinksInPath()
+        let mode = (try? fm.attributesOfItem(atPath: real.path))?[.posixPermissions] as? NSNumber
+        try serialize(after).write(to: real, options: .atomic)
+        if let mode {
+            try fm.setAttributes([.posixPermissions: mode], ofItemAtPath: real.path)
+        }
+        return true
     }
 
     // MARK: - Merge
@@ -149,7 +194,7 @@ enum JSONHookMerger {
     }
 
     /// True if any hook command contains any of the given fragments.
-    static func containsAnyHook(_ settings: [String: Any], fragments: [String]) -> Bool {
+    public static func containsAnyHook(_ settings: [String: Any], fragments: [String]) -> Bool {
         guard let hooks = settings["hooks"] as? [String: Any] else { return false }
         for (_, value) in hooks {
             guard let events = value as? [[String: Any]] else { continue }
@@ -162,5 +207,17 @@ enum JSONHookMerger {
             }
         }
         return false
+    }
+
+    /// True when every spec's command is present under its event.
+    public static func containsAll(_ specs: [HookSpec], in settings: [String: Any]) -> Bool {
+        let hooks = settings["hooks"] as? [String: Any] ?? [:]
+        return specs.allSatisfy { spec in
+            let events = hooks[spec.event] as? [[String: Any]] ?? []
+            return events.contains { entry in
+                let arr = entry["hooks"] as? [[String: Any]] ?? []
+                return arr.contains { ($0["command"] as? String) == spec.command }
+            }
+        }
     }
 }
