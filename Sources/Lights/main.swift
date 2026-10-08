@@ -107,7 +107,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             defer: false
         )
         win.level = .floating
-        win.isMovableByWindowBackground = true
         win.backgroundColor = .clear
         win.isOpaque = false
         win.hasShadow = true
@@ -258,9 +257,51 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 }
 
+/// Moves itself on drag. isMovableByWindowBackground stopped working for
+/// SwiftUI content on macOS 27, so the window can't rely on it.
 final class FloatingWindow: NSWindow {
+    private static let dragThreshold: CGFloat = 3
+
+    private var grab: (mouse: NSPoint, origin: NSPoint)?
+    private var isDragging = false
+
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { true }
+
+    override func sendEvent(_ event: NSEvent) {
+        switch event.type {
+        case .leftMouseDown:
+            grab = (NSEvent.mouseLocation, frame.origin)
+            isDragging = false
+        case .leftMouseDragged:
+            guard let grab else { break }
+            let mouse = NSEvent.mouseLocation
+            let dx = mouse.x - grab.mouse.x
+            let dy = mouse.y - grab.mouse.y
+            if !isDragging && hypot(dx, dy) < Self.dragThreshold { break }
+            isDragging = true
+            setFrameOrigin(NSPoint(x: grab.origin.x + dx, y: grab.origin.y + dy))
+            return
+        case .leftMouseUp:
+            grab = nil
+            if isDragging {
+                isDragging = false
+                // Release outside the window so a drag that started on a bulb
+                // ends the press without toggling it.
+                if let up = NSEvent.mouseEvent(with: .leftMouseUp, location: NSPoint(x: -10_000, y: -10_000),
+                                               modifierFlags: event.modifierFlags, timestamp: event.timestamp,
+                                               windowNumber: event.windowNumber, context: nil,
+                                               eventNumber: event.eventNumber, clickCount: event.clickCount,
+                                               pressure: 0) {
+                    super.sendEvent(up)
+                }
+                return
+            }
+        default:
+            break
+        }
+        super.sendEvent(event)
+    }
 }
 
 // MARK: - Content
