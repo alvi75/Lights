@@ -206,5 +206,53 @@ do {
     check(RemoteSetup.writeSettingsScript.contains("cp -p") && !RemoteSetup.writeSettingsScript.contains("mv "), "remote settings keep mode and symlinks")
 }
 
+// MARK: - Window placement
+
+do {
+    // Laptop is primary; a 1440p monitor sits to its left, lower edge below the laptop's.
+    let laptop = DisplayArea(id: "laptop", frame: CGRect(x: 0, y: 0, width: 1512, height: 982),
+                             visible: CGRect(x: 0, y: 57, width: 1512, height: 892))
+    let monitor = DisplayArea(id: "monitor", frame: CGRect(x: -2560, y: -404, width: 2560, height: 1440),
+                              visible: CGRect(x: -2560, y: -404, width: 2560, height: 1440))
+    let size = CGSize(width: 58, height: 150)
+    let onMonitor = CGRect(x: -400, y: 300, width: 58, height: 150)
+
+    let saved = WindowPlacement.save(frame: onMonitor, displays: [laptop, monitor])
+    check(saved?.display == "monitor", "spot is saved against the monitor")
+
+    let back = WindowPlacement.frame(for: size, saved: saved, current: nil, displays: [laptop, monitor])
+    check(back == onMonitor, "saved spot restored on the same monitor")
+
+    // Asleep: only the laptop is left, and macOS has dropped the window in its middle.
+    let dropped = CGRect(x: -20, y: 400, width: 58, height: 150)
+    let alone = WindowPlacement.frame(for: size, saved: saved, current: dropped, displays: [laptop])
+    check(alone.map { laptop.visible.contains($0) } == true, "while the monitor is gone the light stays fully on the laptop")
+
+    let woke = WindowPlacement.frame(for: size, saved: saved, current: alone, displays: [laptop, monitor])
+    check(woke == onMonitor, "light goes back to the monitor when it returns")
+
+    // Monitor arrangement moved: keep the distance from the monitor's top-right corner.
+    let moved = DisplayArea(id: "monitor", frame: CGRect(x: 1512, y: 0, width: 2560, height: 1440),
+                            visible: CGRect(x: 1512, y: 0, width: 2560, height: 1440))
+    let rearranged = WindowPlacement.frame(for: size, saved: saved, current: nil, displays: [laptop, moved])
+    check(rearranged == CGRect(x: 1512 + 2160, y: 704, width: 58, height: 150), "spot follows the monitor when displays are rearranged")
+
+    let straddle = CGRect(x: -30, y: 400, width: 58, height: 150)
+    let fixed = WindowPlacement.frame(for: size, saved: nil, current: straddle, displays: [laptop, monitor])
+    check(fixed.map { laptop.visible.contains($0) || monitor.visible.contains($0) } == true, "a light split across two displays is pulled onto one")
+
+    let first = WindowPlacement.frame(for: size, saved: nil, current: nil, displays: [laptop, monitor])
+    check(first == CGRect(x: 1512 - 58 - 24, y: 949 - 150 - 24, width: 58, height: 150), "first launch goes to the main display's top-right")
+
+    let bigger = WindowPlacement.frame(for: CGSize(width: 80, height: 200), saved: saved, current: nil, displays: [laptop, monitor])
+    check(bigger.map { $0.maxX == onMonitor.maxX && $0.maxY == onMonitor.maxY } == true, "resized light keeps its top-right corner")
+
+    check(WindowPlacement.save(frame: CGRect(x: 9000, y: 9000, width: 58, height: 150), displays: [laptop]) == nil, "nothing saved for a window on no display")
+    check(WindowPlacement.frame(for: size, saved: saved, current: nil, displays: []) == nil, "no displays, no placement")
+
+    let encoded = try? JSONEncoder().encode(saved)
+    check(encoded.flatMap { try? JSONDecoder().decode(SavedPlacement.self, from: $0) } == saved, "saved spot round-trips")
+}
+
 print("\(passes) passed, \(failures) failed")
 exit(failures == 0 ? 0 : 1)

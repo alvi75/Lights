@@ -90,18 +90,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let storedRaw = UserDefaults.standard.string(forKey: "lightsSize") ?? LightsSize.large.rawValue
         let initialSize = LightsSize(rawValue: storedRaw) ?? .large
         let size = initialSize.windowSize
-        // NSScreen.main can be nil for LSUIElement apps at launch (no key window).
-        // Fall back to the first screen in the list (system primary).
-        let screenObj = NSScreen.main ?? NSScreen.screens.first
-        let screen = screenObj?.visibleFrame ?? CGRect(x: 0, y: 0, width: 1440, height: 900)
-        let origin = NSPoint(
-            x: screen.maxX - size.width - 24,
-            y: screen.maxY - size.height - 24
-        )
-        NSLog("[Lights] Placing window at \(origin) size \(size) on screen \(screen)")
+        let rect = WindowPlacement.frame(for: size, saved: savedPlacement, current: nil, displays: Self.displays())
+            ?? NSRect(x: 0, y: 0, width: size.width, height: size.height)
+        NSLog("[Lights] Placing window at \(rect)")
 
         let win = FloatingWindow(
-            contentRect: NSRect(origin: origin, size: size),
+            contentRect: rect,
             styleMask: [.borderless],
             backing: .buffered,
             defer: false
@@ -117,10 +111,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         self.window = win
         NSApp.activate(ignoringOtherApps: true)
 
+        win.onDragEnd = { [weak self] in self?.savePlacement() }
+        // Displays drop out and come back around sleep and lock, often in several steps.
         NotificationCenter.default.addObserver(
             forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main
         ) { [weak self] _ in
-            self?.keepWindowOnScreen()
+            self?.schedulePlacement()
+        }
+        NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.screensDidWakeNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            self?.schedulePlacement()
+        }
+        DistributedNotificationCenter.default().addObserver(
+            forName: Notification.Name("com.apple.screenIsUnlocked"), object: nil, queue: .main
+        ) { [weak self] _ in
+            self?.schedulePlacement()
         }
         NotificationCenter.default.addObserver(
             forName: .lightsResize, object: nil, queue: .main
@@ -215,15 +221,56 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         setupWindow = panel
     }
 
-    /// After a display is unplugged the window can be left where that screen was.
-    /// Put it back in the top-right corner of the main screen.
-    private func keepWindowOnScreen() {
+    private static let placementKey = "windowPlacement"
+    private static let settleDelay: TimeInterval = 1.0
+
+    private var savedPlacement: SavedPlacement? {
+        get {
+            UserDefaults.standard.data(forKey: Self.placementKey)
+                .flatMap { try? JSONDecoder().decode(SavedPlacement.self, from: $0) }
+        }
+        set {
+            UserDefaults.standard.set(newValue.flatMap { try? JSONEncoder().encode($0) }, forKey: Self.placementKey)
+        }
+    }
+
+    /// Main display first, as WindowPlacement expects.
+    private static func displays() -> [DisplayArea] {
+        NSScreen.screens.map { DisplayArea(id: displayID(of: $0), frame: $0.frame, visible: $0.visibleFrame) }
+    }
+
+    private static func displayID(of screen: NSScreen) -> String {
+        if let number = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID,
+           let uuid = CGDisplayCreateUUIDFromDisplayID(number)?.takeRetainedValue(),
+           let id = CFUUIDCreateString(nil, uuid) as String? {
+            return id
+        }
+        return screen.localizedName
+    }
+
+    /// Only a drag by the user counts. Moves made by macOS when a display
+    /// sleeps or disconnects must not overwrite the spot.
+    private func savePlacement() {
         guard let win = window else { return }
-        let frame = win.frame
-        let visible = NSScreen.screens.contains { $0.visibleFrame.intersects(frame) }
-        guard !visible, let screen = (NSScreen.main ?? NSScreen.screens.first)?.visibleFrame else { return }
-        win.setFrameOrigin(NSPoint(x: screen.maxX - frame.width - 24,
-                                   y: screen.maxY - frame.height - 24))
+        savedPlacement = WindowPlacement.save(frame: win.frame, displays: Self.displays())
+    }
+
+    private var pendingPlacement: DispatchWorkItem?
+
+    /// Waits for the display list to settle, then puts the light back where the user left it.
+    private func schedulePlacement() {
+        pendingPlacement?.cancel()
+        let work = DispatchWorkItem { [weak self] in self?.restorePlacement() }
+        pendingPlacement = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.settleDelay, execute: work)
+    }
+
+    private func restorePlacement() {
+        guard let win = window,
+              let rect = WindowPlacement.frame(for: win.frame.size, saved: savedPlacement,
+                                               current: win.frame, displays: Self.displays()),
+              rect != win.frame else { return }
+        win.setFrame(rect, display: true)
     }
 
     private func applyResize(_ note: Notification) {
@@ -264,6 +311,7 @@ final class FloatingWindow: NSWindow {
 
     private var grab: (mouse: NSPoint, origin: NSPoint)?
     private var isDragging = false
+    var onDragEnd: (() -> Void)?
 
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { true }
@@ -286,6 +334,7 @@ final class FloatingWindow: NSWindow {
             grab = nil
             if isDragging {
                 isDragging = false
+                onDragEnd?()
                 // Release outside the window so a drag that started on a bulb
                 // ends the press without toggling it.
                 if let up = NSEvent.mouseEvent(with: .leftMouseUp, location: NSPoint(x: -10_000, y: -10_000),
