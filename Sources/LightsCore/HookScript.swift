@@ -31,12 +31,20 @@ public enum HookScript {
       done
     }
 
+    # SSH machines that share one home (NFS) each get their own port file.
+    host=$(hostname -s 2>/dev/null || hostname)
+    host=$(printf '%s' "$host" | tr -cd 'A-Za-z0-9.-')
     port=9876
-    [ -f "$dir/port" ] && port=$(cat "$dir/port")
+    if [ -f "$dir/port-$host" ]; then
+      port=$(cat "$dir/port-$host")
+    elif [ -f "$dir/port" ]; then
+      port=$(cat "$dir/port")
+    fi
+    case $port in ''|*[!0-9]*) exit 0 ;; esac
 
     if [ "${TERM_PROGRAM:-}" = vscode ]; then
       # VS Code-style editor terminal, here or over Remote-SSH: shown while the editor is in front.
-      tab="vscode$(find_tty)$(hostname -s 2>/dev/null)"
+      tab="vscode$(find_tty)$host"
     elif [ -f "$dir/port" ]; then
       # SSH machine: the Lights app tunnels the port back to the Mac, and the
       # Mac's terminal tab comes along in LC_LIGHTS_TAB.

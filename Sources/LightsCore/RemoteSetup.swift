@@ -47,6 +47,38 @@ public enum RemoteSetup {
 
     static let portRange = 1024...65535
 
+    /// A new port for every tunnel. A dropped connection can hold its old port on the
+    /// machine for hours, so reusing it would leave the tunnel unable to start.
+    public static func randomTunnelPort() -> Int {
+        Int.random(in: 20000..<60000)
+    }
+
+    /// Runs on the machine once a tunnel is up: checks the port reaches this Mac, then
+    /// points the hook at it through a port file of its own, so machines sharing a home
+    /// don't overwrite each other. Also refreshes the hook, since an older one only reads
+    /// the shared port file.
+    public static func pointHookScript(port: Int) -> String {
+        """
+        set -e
+        umask 077
+        host=$(hostname -s 2>/dev/null || hostname)
+        host=$(printf '%s' "$host" | tr -cd 'A-Za-z0-9.-')
+        tries=0
+        until curl -q -gs --noproxy '*' --max-time 2 "http://127.0.0.1:\(port)/health" | grep -q 'lights ok'; do
+          tries=$((tries + 1))
+          [ "$tries" -lt 5 ] || exit 3
+          sleep 1
+        done
+        mkdir -p "$HOME/.lights"
+        cat > "$HOME/.lights/hook.sh.$$" <<'LIGHTS_HOOK_EOF'
+        \(HookScript.contents)LIGHTS_HOOK_EOF
+        chmod 700 "$HOME/.lights/hook.sh.$$"
+        mv -f "$HOME/.lights/hook.sh.$$" "$HOME/.lights/hook.sh"
+        echo \(port) > "$HOME/.lights/port-$host.$$"
+        mv -f "$HOME/.lights/port-$host.$$" "$HOME/.lights/port-$host"
+        """
+    }
+
     public static func isUsablePort(_ port: Int) -> Bool {
         portRange.contains(port)
     }
@@ -80,7 +112,7 @@ public enum RemoteSetup {
     }
 
     public static let uninstallScript = """
-    rm -f "$HOME/.lights/hook.sh" "$HOME/.lights/port" "$HOME/.lights/auth"
+    rm -f "$HOME/.lights/hook.sh" "$HOME/.lights/port" "$HOME/.lights/port-"* "$HOME/.lights/auth"
     rmdir "$HOME/.lights" 2>/dev/null || true
     """
 

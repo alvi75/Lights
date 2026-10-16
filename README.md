@@ -71,7 +71,7 @@ To have Claude Code running on a server light up the tab you ssh'd from:
 **Add** does three things:
 - **On the server:** installs `~/.lights/hook.sh` and the Claude Code hooks, and saves a backup of `~/.claude/settings.json` first.
 - **On your Mac:** adds one line to `~/.zshrc` (and to `~/.bashrc` / `~/.bash_profile` if they exist). That line exports `LC_LIGHTS_TAB` with your tab's tty name.
-- **Tunnel:** keeps a background `ssh -N -R` tunnel to the server. It reconnects after sleep or network loss.
+- **Tunnel:** keeps a background `ssh -N -R` tunnel to the server. It reconnects after sleep or network loss, on a new port each time, because a dropped connection can keep its old port busy on the server for hours. Once the tunnel answers, the hook on that server is pointed at it (`~/.lights/port-<hostname>`, one per server, so servers sharing a home directory don't clash).
 
 macOS `ssh` forwards `LC_*` variables by default, and most Linux servers accept them (`AcceptEnv LANG LC_*`). If a server doesn't accept them, the light still works, but it can't tell that server's sessions apart by tab.
 

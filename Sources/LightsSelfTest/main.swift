@@ -204,6 +204,90 @@ do {
     check(script.hasPrefix("set -e\numask 077"), "remote files created owner-only")
     check(script.contains("X-Lights-Token: abc\nLIGHTS_AUTH_EOF"), "token written via quoted heredoc")
     check(RemoteSetup.writeSettingsScript.contains("cp -p") && !RemoteSetup.writeSettingsScript.contains("mv "), "remote settings keep mode and symlinks")
+    let ports = (0..<50).map { _ in RemoteSetup.randomTunnelPort() }
+    check(ports.allSatisfy { (20000..<60000).contains($0) }, "tunnel ports stay in range")
+    check(Set(ports).count > 1, "each tunnel gets a fresh port")
+}
+
+// MARK: - Hook script on an SSH machine
+
+/// Runs `script` with sh in `home`, with a fake curl that logs its arguments
+/// and prints `curlReply` (empty: fails like an unreachable port).
+func runShell(_ script: String, home: String, curlReply: String = "") -> (status: Int32, curlLog: String) {
+    let bin = home + "/bin"
+    try? FileManager.default.createDirectory(atPath: bin, withIntermediateDirectories: true)
+    let fake = """
+    #!/bin/sh
+    echo "$*" >> "\(home)/curl.log"
+    [ -n "\(curlReply)" ] || exit 7
+    echo "\(curlReply)"
+
+    """
+    try? fake.write(toFile: bin + "/curl", atomically: true, encoding: .utf8)
+    try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: bin + "/curl")
+    let task = Process()
+    task.executableURL = URL(fileURLWithPath: "/bin/sh")
+    task.arguments = ["-c", script]
+    task.environment = ["HOME": home, "PATH": bin + ":/usr/bin:/bin"]
+    task.standardOutput = FileHandle.nullDevice
+    task.standardError = FileHandle.nullDevice
+    try? task.run()
+    task.waitUntilExit()
+    let log = (try? String(contentsOfFile: home + "/curl.log", encoding: .utf8)) ?? ""
+    try? FileManager.default.removeItem(atPath: home + "/curl.log")
+    return (task.terminationStatus, log)
+}
+
+/// Same name the hook scripts use for this machine.
+func shortHostname() -> String {
+    let task = Process(), out = Pipe()
+    task.executableURL = URL(fileURLWithPath: "/bin/sh")
+    task.arguments = ["-c", "hostname -s 2>/dev/null || hostname"]
+    task.standardOutput = out
+    try? task.run()
+    task.waitUntilExit()
+    let name = String(decoding: out.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+    return name.filter { $0.isLetter || $0.isNumber || $0 == "." || $0 == "-" }
+}
+
+do {
+    let home = tempHome()
+    let host = shortHostname()
+    let dir = home + "/.lights"
+    try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+    try HookScript.contents.write(toFile: dir + "/hook.sh", atomically: true, encoding: .utf8)
+    try "X-Lights-Token: abc\n".write(toFile: dir + "/auth", atomically: true, encoding: .utf8)
+    try "41000\n".write(toFile: dir + "/port", atomically: true, encoding: .utf8)
+    let hook = "sh \"$HOME/.lights/hook.sh\" idle"
+
+    check(runShell(hook, home: home).curlLog.contains("127.0.0.1:41000/"), "hook uses the shared port file")
+
+    // A machine still running an older hook gets the current one when its tunnel is pointed.
+    try "#!/bin/sh\necho old\n".write(toFile: dir + "/hook.sh", atomically: true, encoding: .utf8)
+
+    // Point the hook at a working tunnel, then check the hook follows it.
+    let pointed = runShell(RemoteSetup.pointHookScript(port: 42000), home: home, curlReply: "lights ok")
+    check(pointed.status == 0, "pointing succeeds when the tunnel answers")
+    check(pointed.curlLog.contains("127.0.0.1:42000/health"), "pointing checks the new port first")
+    let portFile = (try? String(contentsOfFile: dir + "/port-\(host)", encoding: .utf8)) ?? ""
+    check(portFile == "42000\n", "this machine's port file written")
+    let installed = (try? String(contentsOfFile: dir + "/hook.sh", encoding: .utf8)) ?? ""
+    check(installed == HookScript.contents, "pointing installs the current hook")
+    check(FileManager.default.isExecutableFile(atPath: dir + "/hook.sh"), "pointed hook is executable")
+    check(runShell(hook, home: home).curlLog.contains("127.0.0.1:42000/"), "hook prefers this machine's port over the shared one")
+
+    // A tunnel that doesn't reach the Mac must not take the hook away from a working one.
+    let dead = runShell(RemoteSetup.pointHookScript(port: 43000), home: home)
+    check(dead.status != 0, "pointing fails when the tunnel doesn't answer")
+    let kept = (try? String(contentsOfFile: dir + "/port-\(host)", encoding: .utf8)) ?? ""
+    check(kept == "42000\n", "port file left alone when the new tunnel doesn't answer")
+
+    // Two pointings at once on one machine (a reconnect while the last one is still checking).
+    // Each runs in its own sh, as each ssh login does.
+    try RemoteSetup.pointHookScript(port: 44000).write(toFile: home + "/a.sh", atomically: true, encoding: .utf8)
+    try RemoteSetup.pointHookScript(port: 44001).write(toFile: home + "/b.sh", atomically: true, encoding: .utf8)
+    let both = "for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do sh \"$HOME/a.sh\" & p1=$!; sh \"$HOME/b.sh\" & p2=$!; wait $p1 || exit 1; wait $p2 || exit 1; done"
+    check(runShell(both, home: home, curlReply: "lights ok").status == 0, "concurrent pointings don't fail each other")
 }
 
 // MARK: - Window placement

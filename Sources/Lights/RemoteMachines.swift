@@ -150,19 +150,10 @@ final class RemoteMachines: ObservableObject {
         guard let token = try? LocalFiles.ensureToken() else { return }
         let authLine = LocalFiles.authLine(token)
         for host in hosts {
-            queue.async { [weak self] in
-                guard let fresh = try? Self.install(on: host.alias, authLine: authLine) else { return }
-                DispatchQueue.main.async { self?.portChanged(host, to: fresh) }
+            queue.async {
+                _ = try? Self.install(on: host.alias, authLine: authLine)
             }
         }
-    }
-
-    /// The machine picked a new port (its ~/.lights/port was deleted): follow it.
-    private func portChanged(_ host: RemoteHost, to fresh: RemoteHost) {
-        guard fresh.port != host.port, hosts.contains(host) else { return }
-        hosts = hosts.map { $0 == host ? fresh : $0 }
-        save()
-        startTunnel(fresh)
     }
 
     func stopAll() {
@@ -171,9 +162,10 @@ final class RemoteMachines: ObservableObject {
 
     private func startTunnel(_ host: RemoteHost) {
         stopTunnel(host.alias)
+        let port = RemoteSetup.randomTunnelPort()
         let task = Process()
         task.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
-        task.arguments = RemoteSetup.tunnelArguments(for: host)
+        task.arguments = RemoteSetup.tunnelArguments(for: RemoteHost(alias: host.alias, port: port))
         task.standardInput = FileHandle.nullDevice
         task.standardOutput = FileHandle.nullDevice
         let err = Pipe()
@@ -192,11 +184,25 @@ final class RemoteMachines: ObservableObject {
         }
         tunnels[host.alias] = task
         savePids()
-        // ssh -N prints nothing on success; still running after a few seconds means up.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 4) { [weak self] in
-            guard let self, self.tunnels[host.alias] === task, task.isRunning else { return }
-            self.status[host.alias] = .connected
-            self.retryDelay[host.alias] = nil
+        pointHook(host, at: port, through: task)
+    }
+
+    /// Once the tunnel answers from the machine's side, the hook there is switched to it.
+    /// A tunnel that never answers is restarted on another port.
+    private func pointHook(_ host: RemoteHost, at port: Int, through task: Process) {
+        // Not on `queue`: a machine that hangs during setup mustn't hold up the others.
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let result = Self.ssh(host.alias, script: RemoteSetup.pointHookScript(port: port))
+            DispatchQueue.main.async {
+                guard let self, self.tunnels[host.alias] === task, task.isRunning else { return }
+                guard result.succeeded else {
+                    NSLog("[Lights] tunnel to \(host.alias) doesn't answer, reconnecting: \(Self.firstLine(result.stderr))")
+                    task.terminate()
+                    return
+                }
+                self.status[host.alias] = .connected
+                self.retryDelay[host.alias] = nil
+            }
         }
     }
 
