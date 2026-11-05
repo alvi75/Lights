@@ -168,7 +168,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
     }
 
-    /// Keeps ~/.lights/hook.sh in step with this build once hooks are installed.
+    /// Keeps ~/.lights/hook.sh, and hooks an older Lights installed, in step with this build.
     private func refreshHookScript() {
         let path = "\(NSHomeDirectory())/\(HookScript.relativePath)"
         guard FileManager.default.fileExists(atPath: path) else { return }
@@ -176,6 +176,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             try LocalFiles.installHookScript()
         } catch {
             NSLog("[Lights] could not update hook script: \(error)")
+        }
+        MainActor.assumeIsolated {
+            let setup = SetupManager.shared
+            for tool in setup.tools where tool.status == .outdated {
+                setup.install(tool)
+                if let why = tool.lastError {
+                    NSLog("[Lights] could not update \(tool.tool.displayName) hooks: \(why)")
+                }
+            }
         }
     }
 
@@ -365,6 +374,14 @@ enum Bulb: Hashable {
         case .green:  self = .green
         }
     }
+
+    var light: Light {
+        switch self {
+        case .red:    .red
+        case .yellow: .yellow
+        case .green:  .green
+        }
+    }
 }
 
 struct ContentView: View {
@@ -397,7 +414,7 @@ struct ContentView: View {
                 NotificationCenter.default.post(name: .lightsShowSetup, object: nil)
             }
             Divider()
-            Button("Off") { setActive(nil) }
+            Button("Off") { showByHand(nil) }
             Divider()
             Button("Quit Lights") { NSApp.terminate(nil) }
         }
@@ -406,7 +423,12 @@ struct ContentView: View {
             setActive(Light(rawValue: raw).map(Bulb.init))
         }
         .onReceive(NotificationCenter.default.publisher(for: .lightsRequestOff)) { _ in
-            setActive(nil)
+            showByHand(nil)
+        }
+        .onAppear {
+            // A change published before this view existed would otherwise be missed.
+            let now = MainActor.assumeIsolated { LightsModel.shared.displayed }
+            setActive(now.map { Bulb($0.light) })
         }
         .onChange(of: size) { _, newSize in
             let dim = newSize.windowSize
@@ -446,7 +468,12 @@ struct ContentView: View {
     }
 
     private func tap(_ light: Bulb) {
-        setActive(active == light ? nil : light)
+        showByHand(active == light ? nil : light)
+    }
+
+    /// Goes through the model, so the next hook report brings the real state back.
+    private func showByHand(_ bulb: Bulb?) {
+        MainActor.assumeIsolated { LightsModel.shared.showByHand(bulb?.light) }
     }
 
     private func setActive(_ light: Bulb?) {

@@ -18,7 +18,17 @@ final class StatusServer {
         self.port = NWEndpoint.Port(rawValue: port)!
     }
 
+    /// Wait before listening again after the listener fails.
+    private static let restartDelay: TimeInterval = 2
+
     func start() {
+        queue.async { [weak self] in self?.listen() }
+    }
+
+    /// Runs on `queue`. A listener that fails (the port still held by a Lights that's
+    /// quitting, the network stack resetting after sleep) is replaced, or every hook
+    /// would go unheard until Lights restarts.
+    private func listen() {
         do {
             let params = NWParameters.tcp
             params.allowLocalEndpointReuse = true
@@ -31,10 +41,32 @@ final class StatusServer {
             listener.newConnectionHandler = { [weak self] conn in
                 self?.handle(conn)
             }
+            listener.stateUpdateHandler = { [weak self, weak listener] state in
+                switch state {
+                case .ready:
+                    NSLog("[Lights] StatusServer listening on 127.0.0.1:\(listener?.port?.rawValue ?? 0)")
+                case .waiting(let error), .failed(let error):
+                    // Waiting doesn't always recover on its own (port still held), so start over.
+                    NSLog("[Lights] StatusServer stopped: \(error)")
+                    listener?.cancel()
+                    guard let self, let listener, self.listener === listener else { return }
+                    self.scheduleRestart()
+                default:
+                    break
+                }
+            }
             listener.start(queue: queue)
-            NSLog("[Lights] StatusServer listening on 127.0.0.1:\(port.rawValue)")
         } catch {
             NSLog("[Lights] StatusServer failed to start: \(error)")
+            scheduleRestart()
+        }
+    }
+
+    private func scheduleRestart() {
+        listener = nil
+        queue.asyncAfter(deadline: .now() + Self.restartDelay) { [weak self] in
+            guard let self, self.listener == nil else { return }
+            self.listen()
         }
     }
 
@@ -104,9 +136,9 @@ final class StatusServer {
 
     private func respond(to route: Route) -> Response {
         switch route {
-        case .signal(let signal, let tab):
+        case .signal(let signal, let tab, let transcript):
             DispatchQueue.main.async {
-                LightsModel.shared.receive(signal, tab: tab)
+                LightsModel.shared.receive(signal, tab: tab, transcript: transcript)
             }
             return Response(status: "200 OK", body: "ok")
         case .status:

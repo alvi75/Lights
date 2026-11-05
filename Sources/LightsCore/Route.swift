@@ -2,14 +2,14 @@ import Foundation
 
 /// HTTP routes served on 127.0.0.1:9876.
 public enum Route: Equatable, Sendable {
-    case signal(Signal, tab: String)
+    case signal(Signal, tab: String, transcript: String?)
     case status
     case snapshot
     case health
     case badRequest
     case notFound
 
-    /// `/state?s=<signal>&tab=<tty>` is what the hook script sends. The bare paths
+    /// `/state?s=<signal>&tab=<tty>[&transcript=<path>]` is what the hook script sends. The bare paths
     /// (`/executing`, `/permission`, `/idle`, `/off`) still work for manual use.
     public init(path: String) {
         let parts = URLComponents(string: path)
@@ -22,10 +22,13 @@ public enum Route: Equatable, Sendable {
                 self = .badRequest
                 return
             }
-            self = .signal(signal, tab: tab)
+            // A transcript that doesn't fit is dropped; the state still counts.
+            let transcript = items.first { $0.name == "transcript" }?.value
+                .flatMap { $0.utf8.count <= Transcript.maxPathLength ? $0 : nil }
+            self = .signal(signal, tab: tab, transcript: transcript)
         case "/executing", "/permission", "/idle", "/off":
             let name = String((parts?.path ?? path).dropFirst())
-            self = Signal(name).map { .signal($0, tab: SessionStore.unknownTab) } ?? .notFound
+            self = Signal(name).map { .signal($0, tab: SessionStore.unknownTab, transcript: nil) } ?? .notFound
         case "/status":
             self = .status
         case "/snapshot":

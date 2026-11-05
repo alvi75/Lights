@@ -15,7 +15,22 @@ if [ ! -f Resources/AppIcon.icns ]; then
 fi
 
 echo "→ Compiling release binary..."
-swift build -c release --arch arm64 --product Lights
+log=$(mktemp -t lights-build)
+trap 'rm -f "$log"' EXIT
+if ! swift build -c release --arch arm64 --product Lights >"$log" 2>&1; then
+    # Command Line Tools ship the macOS 27 SDK without SwiftUI's macro plugin (Xcode
+    # has it), so @State fails to build. An older SDK from the same tools still works.
+    sdk=""
+    if grep -q "plugin for module 'SwiftUIMacros' not found" "$log"; then
+        sdk=$(ls -d "$(xcode-select -p)"/SDKs/MacOSX2[0-6].*sdk "$(xcode-select -p)"/SDKs/MacOSX2[0-6].sdk 2>/dev/null | sort -V | tail -n 1)
+    fi
+    if [ -z "$sdk" ]; then
+        cat "$log"
+        exit 1
+    fi
+    echo "  SwiftUI macros missing from this SDK; building with $(basename "$sdk")"
+    SDKROOT="$sdk" swift build -c release --arch arm64 --product Lights
+fi
 
 echo "→ Assembling $APP_DIR..."
 rm -rf "$APP_DIR"

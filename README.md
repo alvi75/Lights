@@ -82,7 +82,7 @@ macOS `ssh` forwards `LC_*` variables by default, and most Linux servers accept 
 | Show / hide the floating window | Menu-bar icon → *Show / Hide Window* |
 | Open Setup | Menu-bar icon → *Setup Hooks…*, or right-click the floating window |
 | Change size | Right-click the floating window → *Size ▸* |
-| Manual override | Click a light to lock it on until the next change |
+| Manual override | Click a light, or right-click → *Off*, to hold it until the next report or change |
 | Move the window | Drag the dark housing |
 | Quit | Menu-bar icon → *Quit Lights* |
 
@@ -113,9 +113,19 @@ States: `executing` (working), `permission` and `error` (needs you), `idle` (don
 
 The token stops other accounts on a shared server, and web pages in your browser, from changing your light. It is sent from a file with `curl -H @file`, so it never appears in `ps`.
 
+Some moments fire no hook at all: pressing Esc, answering "no" to a permission prompt, a question or a plan, and approving a prompt. So every 2 seconds Lights also checks each Terminal / iTerm2 tab running Claude Code on this Mac:
+
+- **The transcript.** The hook passes the session's transcript path. Esc and "no" add a line there, and the light turns green within 2 seconds.
+- **The keep-awake process.** Claude Code runs `caffeinate` while it works and stops it about 30 seconds after it goes idle. A yellow light with no `caffeinate` turns green. A red light that sat idle and then works again turns yellow, because you approved it.
+- **After Lights restarts**, sessions it hasn't heard from get yellow if they're working and green if not, instead of staying off.
+
 ### Known limitations
 
-- Pressing Esc doesn't fire a hook, so the light stays yellow until your next prompt in that tab.
+- Esc pressed before Claude writes anything leaves no transcript line, so the light turns green about 35 seconds later, when `caffeinate` stops.
+- A prompt you approve within about 30 seconds keeps the light red until that command finishes. Nothing marks the approval in that window.
+- After Lights restarts, a session waiting at a permission prompt shows yellow or green, not red, until its next hook.
+- The Esc and approval checks cover Claude Code in Terminal and iTerm2 tabs on this Mac. Sessions over SSH, in VS Code or in Codex still go by their hooks, though Esc is caught from the transcript in local VS Code terminals too.
+- Reports from a server that doesn't accept `LC_*` carry no tab. They stay until that session ends, so one that dies without ending can leave its color on tabs that have no session of their own.
 - tmux: hooks report the pane's tty, not the Terminal tab's, so tabs running tmux aren't followed.
 - In VS Code, all Claude sessions share one light (the most urgent wins).
 - After updating Lights, each SSH machine's hook script is refreshed the next time the app starts and can reach it.
@@ -130,8 +140,8 @@ Sources/LightsCore/                session states, routes, hook script, JSON mer
 Sources/Lights/
   main.swift                       app delegate, content view, lights window
   StatusServer.swift               HTTP listener on 9876
-  LightsModel.swift                per-tab state → what the light shows
-  FocusTracker.swift               follows the focused Terminal / iTerm2 tab
+  LightsModel.swift                per-tab state → what the light shows, transcript reads
+  FocusTracker.swift               follows the focused Terminal / iTerm2 tab, checks tabs every 2 s
   RemoteMachines.swift             SSH install + background tunnels
   RemoteSection.swift              "SSH machines" part of Setup
   MenuBarController.swift          NSStatusItem + menu
@@ -150,6 +160,12 @@ build-app.sh                       build → .app bundle
 swift build                     # everything
 swift run lights-selftest       # checks (works without Xcode)
 ./build-app.sh                  # .app bundle (re-renders icon)
+```
+
+With only the Command Line Tools, the macOS 27 SDK lacks SwiftUI's macro plugin and the app target fails to build (`plugin for module 'SwiftUIMacros' not found`). `build-app.sh` then builds with the newest older SDK it finds. For a plain `swift build`, set it yourself:
+
+```bash
+SDKROOT=/Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk swift build
 ```
 
 ### License

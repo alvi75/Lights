@@ -17,12 +17,22 @@ public struct SessionStore: Sendable {
     /// opened; ignore that for a moment so the red light isn't lost.
     static let needsYouHold: TimeInterval = 0.25
 
+    /// Claude Code restarts its keep-awake process every few minutes, gone for a fraction
+    /// of a second. Gone longer than this means it stopped working.
+    static let idleGrace: TimeInterval = 5
+
     private struct Entry: Sendable {
         let state: SessionState
         let since: Date
+        /// Last time the tab's Claude Code was seen working since `state` began.
+        var lastBusy: Date? = nil
+        /// Whether it was seen idle since `state` began.
+        var sawIdle = false
     }
 
     private var entries: [String: Entry] = [:]
+    /// Tabs whose session Lights has heard of, so one that just ended isn't guessed back.
+    private var known: Set<String> = []
 
     public init() {}
 
@@ -33,6 +43,7 @@ public struct SessionStore: Sendable {
     }
 
     public mutating func apply(_ signal: Signal, tab: String, at now: Date = Date()) {
+        known.insert(tab)
         guard case .set(let next) = signal else {
             entries[tab] = nil
             return
@@ -50,7 +61,45 @@ public struct SessionStore: Sendable {
     /// Drops Mac terminal tabs that no longer run an AI tool or an SSH session.
     /// Other keys (editor sessions, no-tab reports) go away on their session-end report.
     public mutating func retain(liveTabs: Set<String>) {
-        entries = entries.filter { !$0.key.hasPrefix("ttys") || liveTabs.contains($0.key) }
+        let isKept = { (tab: String) in !tab.hasPrefix("ttys") || liveTabs.contains(tab) }
+        entries = entries.filter { isKept($0.key) }
+        known = known.filter(isKept)
+    }
+
+    /// No hook fires when you press Esc or answer a permission prompt, so each tab running
+    /// Claude Code is checked against whether it's working. A tab Lights hasn't heard from,
+    /// e.g. after Lights restarts, gets its state the same way.
+    public mutating func reconcile(with activity: TabActivity, at now: Date = Date()) {
+        for tab in activity.claude.subtracting(known) {
+            let isBusy = activity.busy.contains(tab)
+            entries[tab] = Entry(state: isBusy ? .working : .done, since: now, lastBusy: isBusy ? now : nil)
+            known.insert(tab)
+        }
+        // Only tabs running Claude Code are ever busy; other entries come through unchanged.
+        entries = Dictionary(uniqueKeysWithValues: entries.map { tab, entry in
+            (tab, Self.checked(entry, isBusy: activity.busy.contains(tab), at: now))
+        })
+    }
+
+    private static func checked(_ entry: Entry, isBusy: Bool, at now: Date) -> Entry {
+        switch entry.state {
+        case .working where isBusy:
+            return Entry(state: .working, since: entry.since, lastBusy: now)
+        case .working:
+            // Seen working, then stopped with no Stop hook: Esc.
+            guard let last = entry.lastBusy, now.timeIntervalSince(last) >= idleGrace else { return entry }
+            return Entry(state: .done, since: now)
+        case .needsYou where isBusy:
+            // Idle while the prompt waited, then working again: it was approved.
+            guard entry.sawIdle else { return Entry(state: .needsYou, since: entry.since, lastBusy: now) }
+            return Entry(state: .working, since: now, lastBusy: now)
+        case .needsYou:
+            let quietSince = entry.lastBusy ?? entry.since
+            guard now.timeIntervalSince(quietSince) >= idleGrace else { return entry }
+            return Entry(state: .needsYou, since: entry.since, lastBusy: entry.lastBusy, sawIdle: true)
+        case .done:
+            return entry
+        }
     }
 
     /// What to show for what's being followed. A tab with no report of its own falls back

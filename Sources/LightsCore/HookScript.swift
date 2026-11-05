@@ -21,6 +21,16 @@ public enum HookScript {
     dir="$HOME/.lights"
     [ -r "$dir/auth" ] || exit 0
 
+    # Claude Code sends the session's details on stdin. Its transcript shows the Esc
+    # presses and "no" answers that no hook reports. Other tools' stdin is left alone.
+    transcript=
+    if [ -n "${CLAUDE_PROJECT_DIR:-}" ] && [ ! -t 0 ]; then
+      input=$(cat)
+      # A tool cut short by Esc: the session stopped, it isn't working again.
+      case $input in *'"is_interrupt":true'*) exit 0 ;; esac
+      transcript=$(printf '%s\n' "$input" | sed -n 's/.*"transcript_path"[[:space:]]*:[[:space:]]*"\([^"\\]*\.jsonl\)".*/\1/p' | head -n 1)
+    fi
+
     # tty of the nearest ancestor that has one; hooks run detached from the terminal.
     find_tty() {
       p=$$
@@ -55,8 +65,9 @@ public enum HookScript {
     tab=$(printf '%s' "$tab" | tr -cd 'A-Za-z0-9' | cut -c1-32)
     case $state in ''|*[!a-z]*) exit 0 ;; esac
 
-    curl -q -gs --noproxy '*' --max-time 1 -H @"$dir/auth" \
-      "http://127.0.0.1:$port/state?s=$state&tab=$tab" >/dev/null 2>&1
+    set -- "http://127.0.0.1:$port/state?s=$state&tab=$tab"
+    [ -n "$transcript" ] && set -- -G --data-urlencode "transcript=$transcript" "$@"
+    curl -q -gs --noproxy '*' --max-time 1 -H @"$dir/auth" "$@" >/dev/null 2>&1
     exit 0
 
     """#

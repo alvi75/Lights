@@ -25,7 +25,7 @@ final class FocusTracker {
 
     private let queue = DispatchQueue(label: "lights.focus")
     private var timer: Timer?
-    private var livenessTimer: Timer?
+    private var tabTimer: Timer?
     private var isQuerying = false
     private var hasFollowed = false
     private var failures = 0
@@ -40,10 +40,11 @@ final class FocusTracker {
         timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.checkFocus() }
         }
-        livenessTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated { self?.pruneClosedTabs() }
+        tabTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.checkTabs() }
         }
         checkFocus()
+        checkTabs()
     }
 
     private func checkFocus() {
@@ -95,12 +96,16 @@ final class FocusTracker {
         }
     }
 
-    private func pruneClosedTabs() {
+    /// Drops closed tabs and checks each session against what its Claude Code is doing.
+    private func checkTabs() {
         queue.async { [weak self] in
-            let result = Shell.run("/bin/ps", ["-axo", "tty=,args="], timeout: 5)
-            guard result.succeeded else { return }
-            let live = LiveTabs.parse(result.stdout)
-            DispatchQueue.main.async { self?.model.retain(liveTabs: live) }
+            let result = Shell.run("/bin/ps", ["-axo", "pid=,ppid=,tty=,args="], timeout: 5)
+            guard result.succeeded else {
+                NSLog("[Lights] ps failed: \(result.stderr)")
+                return
+            }
+            let activity = TabActivity.parse(result.stdout)
+            DispatchQueue.main.async { self?.model.update(activity) }
         }
     }
 }

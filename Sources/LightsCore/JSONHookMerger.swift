@@ -21,6 +21,8 @@ public enum JSONHookMerger {
         spec("PreToolUse",       "AskUserQuestion|ExitPlanMode", "permission"),
         // Any finished tool means work resumed, including after a permission was granted.
         spec("PostToolUse",      "*", "executing"),
+        // A tool that fails (a command exiting non-zero) skips PostToolUse.
+        spec("PostToolUseFailure", "*", "executing"),
         // Only prompts that need an answer; "idle_prompt" fires on a finished session.
         spec("Notification",     "permission_prompt|elicitation_dialog", "permission"),
         spec("Stop",             nil, "idle"),
