@@ -2,14 +2,14 @@ import Foundation
 
 /// HTTP routes served on 127.0.0.1:9876.
 public enum Route: Equatable, Sendable {
-    case signal(Signal, tab: String, transcript: String?)
+    case signal(Signal, tab: String, session: String?)
     case status
     case snapshot
     case health
     case badRequest
     case notFound
 
-    /// `/state?s=<signal>&tab=<tty>[&transcript=<path>]` is what the hook script sends. The bare paths
+    /// `/state?s=<signal>&tab=<tty>[&session=<id>]` is what the hook script sends. The bare paths
     /// (`/executing`, `/permission`, `/idle`, `/off`) still work for manual use.
     public init(path: String) {
         let parts = URLComponents(string: path)
@@ -22,13 +22,14 @@ public enum Route: Equatable, Sendable {
                 self = .badRequest
                 return
             }
-            // A transcript that doesn't fit is dropped; the state still counts.
-            let transcript = items.first { $0.name == "transcript" }?.value
-                .flatMap { $0.utf8.count <= Transcript.maxPathLength ? $0 : nil }
-            self = .signal(signal, tab: tab, transcript: transcript)
+            // A malformed session id is dropped; the state still counts.
+            let session = items.first { $0.name == "session" }?.value.flatMap {
+                ClaudeStatus.isSessionID($0) ? $0 : nil
+            }
+            self = .signal(signal, tab: tab, session: session)
         case "/executing", "/permission", "/idle", "/off":
             let name = String((parts?.path ?? path).dropFirst())
-            self = Signal(name).map { .signal($0, tab: SessionStore.unknownTab, transcript: nil) } ?? .notFound
+            self = Signal(name).map { .signal($0, tab: SessionStore.unknownTab, session: nil) } ?? .notFound
         case "/status":
             self = .status
         case "/snapshot":

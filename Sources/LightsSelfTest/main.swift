@@ -25,7 +25,7 @@ func tempHome() -> String {
 
 check(Signal("executing") == .set(.working), "executing means working")
 check(Signal("permission") == .set(.needsYou), "permission needs you")
-check(Signal("error") == .set(.needsYou), "API error needs you")
+check(Signal("error") == .failed, "API error needs you")
 check(Signal("idle") == .set(.done), "idle means done")
 check(Signal("end") == .end && Signal("off") == .end, "end and off clear the session")
 check(Signal("bogus") == nil, "unknown signal rejected")
@@ -79,15 +79,15 @@ do {
 
 // MARK: - Routes
 
-check(Route(path: "/state?s=executing&tab=ttys002") == .signal(.set(.working), tab: "ttys002", transcript: nil), "state route")
-check(Route(path: "/state?s=idle&tab=ttys002&transcript=%2FUsers%2Fme%2F.claude%2Fprojects%2Fp%2Fs.jsonl")
-      == .signal(.set(.done), tab: "ttys002", transcript: "/Users/me/.claude/projects/p/s.jsonl"), "transcript passed along")
-check(Route(path: "/state?s=idle&tab=ttys002&transcript=/" + String(repeating: "a", count: 2000) + ".jsonl")
-      == .signal(.set(.done), tab: "ttys002", transcript: nil), "overlong transcript dropped, state kept")
-check(Route(path: "/state?s=idle") == .signal(.set(.done), tab: SessionStore.unknownTab, transcript: nil), "state without tab")
+check(Route(path: "/state?s=executing&tab=ttys002") == .signal(.set(.working), tab: "ttys002", session: nil), "state route")
+check(Route(path: "/state?s=idle&tab=ttys002&session=5d5fc504-a061-46a6-8968-f29f21aeb988")
+      == .signal(.set(.done), tab: "ttys002", session: "5d5fc504-a061-46a6-8968-f29f21aeb988"), "session id passed along")
+check(Route(path: "/state?s=idle&tab=ttys002&session=..%2F..%2Fetc")
+      == .signal(.set(.done), tab: "ttys002", session: nil), "odd session id dropped, state kept")
+check(Route(path: "/state?s=idle") == .signal(.set(.done), tab: SessionStore.unknownTab, session: nil), "state without tab")
 check(Route(path: "/state?s=idle&tab=../etc") == .badRequest, "odd tab names rejected")
 check(Route(path: "/state?s=nope&tab=ttys001") == .badRequest, "unknown state rejected")
-check(Route(path: "/permission") == .signal(.set(.needsYou), tab: SessionStore.unknownTab, transcript: nil), "old path still works")
+check(Route(path: "/permission") == .signal(.set(.needsYou), tab: SessionStore.unknownTab, session: nil), "old path still works")
 check(Route(path: "/status") == .status, "status route")
 check(Route(path: "/nope") == .notFound, "unknown path")
 check(Route.isFromBrowser("GET /idle HTTP/1.1\r\nHost: x\r\nOrigin: https://evil.example\r\n\r\n"), "browser request detected")
@@ -129,80 +129,108 @@ do {
       200     1 ttys002  node /opt/homebrew/bin/claude --resume
       300     1 ttys003  ssh devbox
       400     1 ttys004  vim notes.txt
-      401   400 ttys004  caffeinate -i
       500     1 ttys005  /Users/me/.local/bin/codex
       600     1 ??       /usr/sbin/sshd
+      601     1 ??       /usr/bin/ssh -N -T devbox
       700     1 ??       claude bg-pty-host
-      701   700 ttys009  claude bg-spare
-      702   701 ttys009  caffeinate -i -t 300
     """
     let activity = TabActivity.parse(ps)
-    check(activity.live == ["ttys001", "ttys002", "ttys003", "ttys005", "ttys009"], "live tabs found")
-    check(activity.claude == ["ttys001", "ttys002", "ttys009"], "Claude Code tabs found, npm installs too")
-    check(activity.busy == ["ttys001", "ttys009"], "busy means Claude Code's own keep-awake process")
+    check(activity.live == ["ttys001", "ttys002", "ttys003", "ttys005"], "live tabs found")
+    check(activity.claude == ["ttys001": [101], "ttys002": [200]], "Claude Code processes by tab, npm installs too")
+    check(activity.ssh == ["ttys003"], "ssh in a tab found, background tunnels aren't tabs")
+    check(activity.pids.contains(700) && activity.pids.count == 10, "every process counted")
     check(TabActivity.parse("garbage\n\n  12 x\n").live.isEmpty, "unparseable ps lines skipped")
 }
 
-// MARK: - Checking hook states against Claude Code's activity
+// MARK: - Claude Code's session status
+
+do {
+    let file = #"{"pid":33288,"sessionId":"53feecce-9682-4151-a8b0-6ed6a7813a31","cwd":"/Users/me","status":"waiting","waitingFor":"permission prompt","updatedAt":1793890325353,"statusUpdatedAt":1793890325353}"#
+    let status = ClaudeStatus.parse(Data(file.utf8))
+    check(status == ClaudeStatus(pid: 33288, sessionId: "53feecce-9682-4151-a8b0-6ed6a7813a31", phase: .waiting,
+                                 since: Date(timeIntervalSince1970: 1793890325.353)), "status file read")
+    check(ClaudeStatus.parse(Data(#"{"pid":1,"sessionId":"a","status":"thinking","statusUpdatedAt":1}"#.utf8)) == nil, "unknown status ignored")
+    check(ClaudeStatus.parse(Data(#"{"pid":1,"sessionId":"a","status":"idle"}"#.utf8)) == nil, "status without a time ignored")
+    check(ClaudeStatus.parse(Data(#"{"pid":1,"sessionId":"../x","status":"idle","statusUpdatedAt":1}"#.utf8)) == nil, "odd session id ignored")
+    check(ClaudeStatus.parse(Data("not json".utf8)) == nil, "broken file ignored")
+}
+
+// MARK: - Checking hook states against Claude Code's status
 
 do {
     let t0 = Date()
     func at(_ seconds: TimeInterval) -> Date { t0.addingTimeInterval(seconds) }
-    let busy = TabActivity(live: ["ttys001"], claude: ["ttys001"], busy: ["ttys001"])
-    let idle = TabActivity(live: ["ttys001"], claude: ["ttys001"], busy: [])
+    let tab = TabActivity(live: ["ttys001"], claude: ["ttys001": [101]], pids: [101])
+    func status(_ phase: ClaudeStatus.Phase, _ seconds: TimeInterval, pid: Int = 101, id: String = "s1") -> [ClaudeStatus] {
+        [ClaudeStatus(pid: pid, sessionId: id, phase: phase, since: at(seconds))]
+    }
 
     var store = SessionStore()
     store.apply(.set(.working), tab: "ttys001", at: t0)
-    store.reconcile(with: busy, at: at(1))
-    store.reconcile(with: idle, at: at(3))
-    check(store.state(of: "ttys001") == .working, "a short gap in the keep-awake process is ignored")
-    store.reconcile(with: busy, at: at(4))
-    store.reconcile(with: idle, at: at(8))
-    check(store.state(of: "ttys001") == .working, "still within the grace period")
-    store.reconcile(with: idle, at: at(10))
-    check(store.state(of: "ttys001") == .done, "working, then stopped without a hook (Esc) turns green")
-
-    var unseen = SessionStore()
-    unseen.apply(.set(.working), tab: "ttys001", at: t0)
-    unseen.reconcile(with: idle, at: at(60))
-    check(unseen.state(of: "ttys001") == .working, "never seen working: no keep-awake process to go by, state kept")
+    store.reconcile(with: tab, statuses: status(.busy, -1), at: at(1))
+    check(store.state(of: "ttys001") == .working, "busy keeps yellow")
+    store.reconcile(with: tab, statuses: status(.idle, 3), at: at(4))
+    check(store.state(of: "ttys001") == .done, "idle after working with no Stop hook (Esc) turns green")
 
     var prompt = SessionStore()
     prompt.apply(.set(.working), tab: "ttys001", at: t0)
-    prompt.reconcile(with: busy, at: at(1))
-    prompt.apply(.set(.needsYou), tab: "ttys001", at: at(2))
-    prompt.reconcile(with: busy, at: at(4))
-    check(prompt.state(of: "ttys001") == .needsYou, "a waiting prompt stays red while the process lingers")
-    prompt.reconcile(with: idle, at: at(6))
-    prompt.reconcile(with: busy, at: at(7))
-    check(prompt.state(of: "ttys001") == .needsYou, "the keep-awake process's restart gap doesn't count as approval")
-    prompt.reconcile(with: idle, at: at(40))
-    check(prompt.state(of: "ttys001") == .needsYou, "a long wait stays red")
-    prompt.reconcile(with: busy, at: at(50))
-    check(prompt.state(of: "ttys001") == .working, "working again after the wait means you approved it")
+    prompt.reconcile(with: tab, statuses: status(.waiting, 1), at: at(2))
+    check(prompt.state(of: "ttys001") == .needsYou, "a waiting prompt turns red before the hook does")
+    prompt.apply(.set(.needsYou), tab: "ttys001", at: at(6))
+    prompt.apply(.set(.working), tab: "ttys001", at: at(7))
+    prompt.reconcile(with: tab, statuses: status(.waiting, 1), at: at(8))
+    check(prompt.state(of: "ttys001") == .needsYou, "a parallel tool's report doesn't hide an open prompt")
+    prompt.reconcile(with: tab, statuses: status(.busy, 9), at: at(10))
+    check(prompt.state(of: "ttys001") == .working, "approving turns yellow right away")
 
-    var done = SessionStore()
-    done.apply(.set(.done), tab: "ttys001", at: t0)
-    done.reconcile(with: busy, at: at(1))
-    check(done.state(of: "ttys001") == .done, "the keep-awake process lingers after a turn; green stays")
+    var denied = SessionStore()
+    denied.apply(.set(.needsYou), tab: "ttys001", at: t0)
+    denied.reconcile(with: tab, statuses: status(.idle, 2), at: at(3))
+    check(denied.state(of: "ttys001") == .done, "saying no turns green")
+
+    var late = SessionStore()
+    late.apply(.set(.working), tab: "ttys001", at: at(5))
+    late.reconcile(with: tab, statuses: status(.idle, 4), at: at(6))
+    check(late.state(of: "ttys001") == .working, "a hook newer than the status wins (prompt just sent)")
+
+    var failed = SessionStore()
+    failed.apply(.failed, tab: "ttys001", at: t0)
+    failed.reconcile(with: tab, statuses: status(.idle, 1), at: at(2))
+    check(failed.state(of: "ttys001") == .needsYou, "an API error stays red when the session goes idle")
+    failed.reconcile(with: tab, statuses: status(.busy, 3), at: at(4))
+    check(failed.state(of: "ttys001") == .working, "and clears once it works again")
+
+    var gone = SessionStore()
+    gone.apply(.set(.working), tab: "ttys001", at: t0)
+    gone.reconcile(with: TabActivity(live: ["ttys001"], claude: ["ttys001": [101]], pids: []), statuses: status(.idle, 2), at: at(3))
+    check(gone.state(of: "ttys001") == .working, "a status file left by an exited process is ignored")
+
+    var editor = SessionStore()
+    let none = TabActivity(live: [], claude: [:], pids: [900])
+    editor.apply(.set(.working), tab: "vscodettys012mac", session: "s9", at: t0)
+    editor.reconcile(with: none, statuses: status(.idle, 2, pid: 900, id: "s9"), at: at(3))
+    check(editor.state(of: "vscodettys012mac") == .done, "sessions outside Terminal tabs are matched by session id")
 
     var fresh = SessionStore()
-    fresh.reconcile(with: TabActivity(live: ["ttys001", "ttys002", "ttys005"], claude: ["ttys001", "ttys002"], busy: ["ttys001"]), at: t0)
+    let three = TabActivity(live: ["ttys001", "ttys002", "ttys003"], claude: ["ttys001": [101], "ttys002": [201], "ttys003": [301]], pids: [101, 201, 301])
+    fresh.reconcile(with: three, statuses: status(.busy, -5) + status(.waiting, -5, pid: 201, id: "s2"), at: t0)
     check(fresh.state(of: "ttys001") == .working, "after a restart a working session shows yellow")
-    check(fresh.state(of: "ttys002") == .done, "after a restart an idle session shows green")
-    check(fresh.state(of: "ttys005") == nil, "other tools aren't guessed")
+    check(fresh.state(of: "ttys002") == .needsYou, "after a restart a waiting prompt shows red")
+    check(fresh.state(of: "ttys003") == .done, "after a restart a session with no status shows green")
 
-    fresh.apply(.end, tab: "ttys002", at: at(1))
-    fresh.reconcile(with: TabActivity(live: ["ttys002"], claude: ["ttys002"], busy: []), at: at(2))
-    check(fresh.state(of: "ttys002") == nil, "an ended session isn't brought back while its process exits")
+    fresh.apply(.end, tab: "ttys003", at: at(1))
+    fresh.reconcile(with: three, statuses: [], at: at(2))
+    check(fresh.state(of: "ttys003") == nil, "an ended session isn't brought back while its process exits")
     fresh.retain(liveTabs: [])
-    fresh.reconcile(with: TabActivity(live: ["ttys002"], claude: ["ttys002"], busy: []), at: at(9))
-    check(fresh.state(of: "ttys002") == .done, "a tab closed and reused starts fresh")
+    fresh.reconcile(with: three, statuses: [], at: at(9))
+    check(fresh.state(of: "ttys003") == .done, "a tab closed and reused starts fresh")
 
     var remote = SessionStore()
-    remote.apply(.set(.working), tab: "ttys003", at: t0)
-    remote.reconcile(with: TabActivity(live: ["ttys003"], claude: [], busy: []), at: at(60))
-    check(remote.state(of: "ttys003") == .working, "tabs running ssh are left to their hooks")
+    remote.apply(.set(.needsYou), tab: SessionStore.unknownTab, at: t0)
+    remote.reconcile(with: TabActivity(live: ["ttys003"], claude: [:], ssh: ["ttys003"]), statuses: [], at: at(1))
+    check(remote.state(of: SessionStore.unknownTab) == .needsYou, "a tabless report stays while ssh is open")
+    remote.reconcile(with: TabActivity(live: [], claude: [:]), statuses: [], at: at(2))
+    check(remote.state(of: SessionStore.unknownTab) == nil, "and goes once no tab runs ssh")
 }
 
 // MARK: - Redrawing the light
@@ -218,35 +246,6 @@ do {
     check(!gate.shouldShow(.working, isReport: true), "after that, the same report isn't redrawn")
     gate.pickedByHand()
     check(gate.shouldShow(.done, isReport: false), "a real change replaces a light picked by hand")
-}
-
-// MARK: - Transcripts
-
-do {
-    let home = "/Users/me"
-    check(Transcript.isAllowed("/Users/me/.claude/projects/-Users-me-app/1a2b.jsonl", home: home), "transcript in home allowed")
-    check(!Transcript.isAllowed("/etc/passwd.jsonl", home: home), "outside home refused")
-    check(!Transcript.isAllowed("/Users/me/../other/x.jsonl", home: home), "dot-dot refused")
-    check(!Transcript.isAllowed("/Users/me/.ssh/id_ed25519", home: home), "only .jsonl files")
-    check(!Transcript.isAllowed("/Users/meyer/x.jsonl", home: home), "a home with a longer name isn't inside home")
-    check(!Transcript.isAllowed("/Users/me/a\nb.jsonl", home: home), "control characters refused")
-    check(!Transcript.isAllowed("relative/x.jsonl", home: home), "relative path refused")
-
-    let esc = #"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"[Request interrupted by user for tool use]"}]}}"#
-    let escText = #"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"[Request interrupted by user]"}]}}"#
-    let toolOutput = #"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":[{"type":"text","text":"[Request interrupted by user]"}]}]}}"#
-    let assistant = #"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"[Request interrupted by user]"}]}}"#
-    let prompt = #"{"type":"user","message":{"role":"user","content":"why did it stop"}}"#
-    func lines(_ items: String...) -> Data { Data((items.joined(separator: "\n") + "\n").utf8) }
-    check(Transcript.hasInterrupt(lines(prompt, esc)), "Esc at a prompt or tool found")
-    check(Transcript.hasInterrupt(lines(escText)), "Esc while writing found")
-    check(!Transcript.hasInterrupt(lines(prompt, toolOutput)), "the marker inside tool output doesn't count")
-    check(!Transcript.hasInterrupt(lines(assistant)), "the marker in Claude's reply doesn't count")
-    check(!Transcript.hasInterrupt(Data(#"{"type":"user","message":{"content":[{"type":"text","text":"[Request interrupted"#.utf8)), "a cut-off line doesn't count")
-
-    let partial = Data("one\ntwo\nthr".utf8)
-    check(Transcript.completeLength(of: partial) == 8, "only whole lines are read")
-    check(Transcript.completeLength(of: Data("no newline".utf8)) == 0, "a line still being written waits")
 }
 
 // MARK: - Hook merging
@@ -419,22 +418,22 @@ do {
     try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
     try HookScript.contents.write(toFile: dir + "/hook.sh", atomically: true, encoding: .utf8)
     try "X-Lights-Token: abc\n".write(toFile: dir + "/auth", atomically: true, encoding: .utf8)
-    let input = #"{"session_id":"s1","transcript_path":"/Users/me/.claude/projects/-Users-me-app/s1.jsonl","cwd":"/Users/me/app","tool_response":{"stdout":"\"transcript_path\":\"/evil.jsonl\""}}"#
+    let input = #"{"session_id":"5d5fc504-a061-46a6-8968-f29f21aeb988","transcript_path":"/Users/me/x.jsonl","tool_response":{"session_id":"other","text":"\"session_id\":\"evil\""}}"#
     try input.write(toFile: home + "/input.json", atomically: true, encoding: .utf8)
 
     let claude = runShell("CLAUDE_PROJECT_DIR=/Users/me/app sh \"$HOME/.lights/hook.sh\" executing < \"$HOME/input.json\"", home: home)
     check(claude.status == 0, "hook exits cleanly")
     check(claude.curlLog.contains("127.0.0.1:9876/state?s=executing&tab="), "hook reports the state")
-    check(claude.curlLog.contains("--data-urlencode transcript=/Users/me/.claude/projects/-Users-me-app/s1.jsonl"), "hook passes Claude Code's transcript")
-    check(!claude.curlLog.contains("evil"), "a path inside tool output isn't taken for the transcript")
+    check(claude.curlLog.contains("&session=5d5fc504-a061-46a6-8968-f29f21aeb988"), "hook passes Claude Code's session id")
+    check(!claude.curlLog.contains("other") && !claude.curlLog.contains("evil"), "an id inside tool output isn't taken")
 
-    let stopped = #"{"hook_event_name":"PostToolUseFailure","transcript_path":"/Users/me/.claude/projects/p/s1.jsonl","is_interrupt":true}"#
+    let stopped = #"{"session_id":"s1","hook_event_name":"PostToolUseFailure","is_interrupt":true}"#
     try stopped.write(toFile: home + "/stopped.json", atomically: true, encoding: .utf8)
     let esc = runShell("CLAUDE_PROJECT_DIR=/Users/me/app sh \"$HOME/.lights/hook.sh\" executing < \"$HOME/stopped.json\"", home: home)
     check(esc.status == 0 && esc.curlLog.isEmpty, "a tool cut short by Esc isn't reported as working")
 
     let other = runShell("sh \"$HOME/.lights/hook.sh\" executing < \"$HOME/input.json\"", home: home)
-    check(other.curlLog.contains("s=executing") && !other.curlLog.contains("transcript"), "other tools' input isn't read")
+    check(other.curlLog.contains("s=executing") && !other.curlLog.contains("session="), "other tools' input isn't read")
 }
 
 // MARK: - Window placement

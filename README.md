@@ -113,19 +113,19 @@ States: `executing` (working), `permission` and `error` (needs you), `idle` (don
 
 The token stops other accounts on a shared server, and web pages in your browser, from changing your light. It is sent from a file with `curl -H @file`, so it never appears in `ps`.
 
-Some moments fire no hook at all: pressing Esc, answering "no" to a permission prompt, a question or a plan, and approving a prompt. So every 2 seconds Lights also checks each Terminal / iTerm2 tab running Claude Code on this Mac:
+Some moments fire no hook at all: pressing Esc, answering "no" to a permission prompt, a question or a plan, and approving a prompt. Claude Code does keep its own status for each session in `~/.claude/sessions/<pid>.json`: `busy`, `waiting` (a prompt or dialog needs you) or `idle`. Every 2 seconds Lights reads those files and corrects each session's light:
 
-- **The transcript.** The hook passes the session's transcript path. Esc and "no" add a line there, and the light turns green within 2 seconds.
-- **The keep-awake process.** Claude Code runs `caffeinate` while it works and stops it about 30 seconds after it goes idle. A yellow light with no `caffeinate` turns green. A red light that sat idle and then works again turns yellow, because you approved it.
-- **After Lights restarts**, sessions it hasn't heard from get yellow if they're working and green if not, instead of staying off.
+- Esc, "no" and a finished turn turn it green; an approval turns it yellow; an open prompt turns it red, a few seconds before the hook would.
+- A report that came after the status changed wins, so a prompt you just sent isn't undone.
+- A turn that ended on an API error stays red until the session works again.
+- Terminal and iTerm2 tabs are matched to Claude Code by process; VS Code terminals on this Mac by the session id the hook passes.
+- After Lights restarts, sessions it hasn't heard from get their state the same way, instead of staying off.
 
 ### Known limitations
 
-- Esc pressed before Claude writes anything leaves no transcript line, so the light turns green about 35 seconds later, when `caffeinate` stops.
-- A prompt you approve within about 30 seconds keeps the light red until that command finishes. Nothing marks the approval in that window.
-- After Lights restarts, a session waiting at a permission prompt shows yellow or green, not red, until its next hook.
-- The Esc and approval checks cover Claude Code in Terminal and iTerm2 tabs on this Mac. Sessions over SSH, in VS Code or in Codex still go by their hooks, though Esc is caught from the transcript in local VS Code terminals too.
-- Reports from a server that doesn't accept `LC_*` carry no tab. They stay until that session ends, so one that dies without ending can leave its color on tabs that have no session of their own.
+- The status check needs a Claude Code that writes `~/.claude/sessions/` (2.1.317 and 2.1.318 do) and the default config folder. Without it the light goes by hooks alone, and Esc leaves it yellow.
+- Sessions over SSH and Codex sessions go by their hooks alone.
+- Reports from a server that doesn't accept `LC_*` carry no tab. They are dropped once no tab runs `ssh`.
 - tmux: hooks report the pane's tty, not the Terminal tab's, so tabs running tmux aren't followed.
 - In VS Code, all Claude sessions share one light (the most urgent wins).
 - After updating Lights, each SSH machine's hook script is refreshed the next time the app starts and can reach it.
@@ -140,8 +140,8 @@ Sources/LightsCore/                session states, routes, hook script, JSON mer
 Sources/Lights/
   main.swift                       app delegate, content view, lights window
   StatusServer.swift               HTTP listener on 9876
-  LightsModel.swift                per-tab state → what the light shows, transcript reads
-  FocusTracker.swift               follows the focused Terminal / iTerm2 tab, checks tabs every 2 s
+  LightsModel.swift                per-tab state → what the light shows
+  FocusTracker.swift               follows the focused Terminal / iTerm2 tab, checks sessions every 2 s
   RemoteMachines.swift             SSH install + background tunnels
   RemoteSection.swift              "SSH machines" part of Setup
   MenuBarController.swift          NSStatusItem + menu

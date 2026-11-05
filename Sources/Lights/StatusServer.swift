@@ -136,9 +136,9 @@ final class StatusServer {
 
     private func respond(to route: Route) -> Response {
         switch route {
-        case .signal(let signal, let tab, let transcript):
+        case .signal(let signal, let tab, let session):
             DispatchQueue.main.async {
-                LightsModel.shared.receive(signal, tab: tab, transcript: transcript)
+                LightsModel.shared.receive(signal, tab: tab, session: session)
             }
             return Response(status: "200 OK", body: "ok")
         case .status:

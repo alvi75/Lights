@@ -96,7 +96,7 @@ final class FocusTracker {
         }
     }
 
-    /// Drops closed tabs and checks each session against what its Claude Code is doing.
+    /// Drops closed tabs and checks each session against what Claude Code says it's doing.
     private func checkTabs() {
         queue.async { [weak self] in
             let result = Shell.run("/bin/ps", ["-axo", "pid=,ppid=,tty=,args="], timeout: 5)
@@ -105,7 +105,17 @@ final class FocusTracker {
                 return
             }
             let activity = TabActivity.parse(result.stdout)
-            DispatchQueue.main.async { self?.model.update(activity) }
+            let statuses = Self.claudeStatuses()
+            DispatchQueue.main.async { self?.model.update(activity, statuses: statuses) }
         }
+    }
+
+    /// ~/.claude/sessions/<pid>.json, one per running Claude Code.
+    private nonisolated static func claudeStatuses() -> [ClaudeStatus] {
+        let dir = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".claude/sessions")
+        let files = (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? []
+        return files.filter { $0.pathExtension == "json" }
+            .compactMap { try? Data(contentsOf: $0) }
+            .compactMap(ClaudeStatus.parse)
     }
 }

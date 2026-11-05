@@ -17,22 +17,18 @@ public struct SessionStore: Sendable {
     /// opened; ignore that for a moment so the red light isn't lost.
     static let needsYouHold: TimeInterval = 0.25
 
-    /// Claude Code restarts its keep-awake process every few minutes, gone for a fraction
-    /// of a second. Gone longer than this means it stopped working.
-    static let idleGrace: TimeInterval = 5
-
     private struct Entry: Sendable {
         let state: SessionState
         let since: Date
-        /// Last time the tab's Claude Code was seen working since `state` began.
-        var lastBusy: Date? = nil
-        /// Whether it was seen idle since `state` began.
-        var sawIdle = false
+        /// Red from an API error rather than a prompt; it stays until you act.
+        var isError = false
     }
 
     private var entries: [String: Entry] = [:]
     /// Tabs whose session Lights has heard of, so one that just ended isn't guessed back.
     private var known: Set<String> = []
+    /// Claude Code session id each tab's hooks reported.
+    private var sessions: [String: String] = [:]
 
     public init() {}
 
@@ -42,11 +38,20 @@ public struct SessionStore: Sendable {
         entries[tab]?.state
     }
 
-    public mutating func apply(_ signal: Signal, tab: String, at now: Date = Date()) {
+    public mutating func apply(_ signal: Signal, tab: String, session: String? = nil, at now: Date = Date()) {
         known.insert(tab)
-        guard case .set(let next) = signal else {
+        if let session { sessions[tab] = session }
+        let next: SessionState
+        switch signal {
+        case .end:
             entries[tab] = nil
+            sessions[tab] = nil
             return
+        case .failed:
+            entries[tab] = Entry(state: .needsYou, since: now, isError: true)
+            return
+        case .set(let state):
+            next = state
         }
         if let current = entries[tab] {
             if current.state == next { return }
@@ -64,41 +69,42 @@ public struct SessionStore: Sendable {
         let isKept = { (tab: String) in !tab.hasPrefix("ttys") || liveTabs.contains(tab) }
         entries = entries.filter { isKept($0.key) }
         known = known.filter(isKept)
+        sessions = sessions.filter { isKept($0.key) }
     }
 
-    /// No hook fires when you press Esc or answer a permission prompt, so each tab running
-    /// Claude Code is checked against whether it's working. A tab Lights hasn't heard from,
-    /// e.g. after Lights restarts, gets its state the same way.
-    public mutating func reconcile(with activity: TabActivity, at now: Date = Date()) {
-        for tab in activity.claude.subtracting(known) {
-            let isBusy = activity.busy.contains(tab)
-            entries[tab] = Entry(state: isBusy ? .working : .done, since: now, lastBusy: isBusy ? now : nil)
+    /// Checks each session against what Claude Code says it's doing (`statuses`), since
+    /// no hook fires for Esc, a "no" or an approval. Tabs Lights hasn't heard from, e.g.
+    /// after it restarts, get their state the same way.
+    public mutating func reconcile(with activity: TabActivity, statuses: [ClaudeStatus], at now: Date = Date()) {
+        let running = statuses.filter { activity.pids.contains($0.pid) }
+        func status(of tab: String) -> ClaudeStatus? {
+            running.filter { activity.claude[tab]?.contains($0.pid) == true || $0.sessionId == sessions[tab] }
+                .max { $0.since < $1.since }
+        }
+        for tab in Set(activity.claude.keys).subtracting(known) {
+            entries[tab] = Entry(state: status(of: tab)?.phase.state ?? .done, since: now)
             known.insert(tab)
         }
-        // Only tabs running Claude Code are ever busy; other entries come through unchanged.
+        // Tabless reports come from servers; with no ssh open, whatever sent them is gone.
+        if activity.ssh.isEmpty {
+            entries[Self.unknownTab] = nil
+        }
         entries = Dictionary(uniqueKeysWithValues: entries.map { tab, entry in
-            (tab, Self.checked(entry, isBusy: activity.busy.contains(tab), at: now))
+            (tab, status(of: tab).map { Self.checked(entry, against: $0, at: now) } ?? entry)
         })
     }
 
-    private static func checked(_ entry: Entry, isBusy: Bool, at now: Date) -> Entry {
-        switch entry.state {
-        case .working where isBusy:
-            return Entry(state: .working, since: entry.since, lastBusy: now)
-        case .working:
-            // Seen working, then stopped with no Stop hook: Esc.
-            guard let last = entry.lastBusy, now.timeIntervalSince(last) >= idleGrace else { return entry }
-            return Entry(state: .done, since: now)
-        case .needsYou where isBusy:
-            // Idle while the prompt waited, then working again: it was approved.
-            guard entry.sawIdle else { return Entry(state: .needsYou, since: entry.since, lastBusy: now) }
-            return Entry(state: .working, since: now, lastBusy: now)
-        case .needsYou:
-            let quietSince = entry.lastBusy ?? entry.since
-            guard now.timeIntervalSince(quietSince) >= idleGrace else { return entry }
-            return Entry(state: .needsYou, since: entry.since, lastBusy: entry.lastBusy, sawIdle: true)
-        case .done:
-            return entry
+    private static func checked(_ entry: Entry, against status: ClaudeStatus, at now: Date) -> Entry {
+        switch status.phase {
+        case .waiting:
+            // Holds while the prompt is open, even over a parallel tool's late report.
+            return entry.state == .needsYou ? entry : Entry(state: .needsYou, since: now)
+        case _ where status.since <= entry.since:
+            return entry    // a hook reported after this change
+        case .busy:
+            return entry.state == .working ? entry : Entry(state: .working, since: now)
+        case .idle:
+            return entry.state == .done || entry.isError ? entry : Entry(state: .done, since: now)
         }
     }
 
@@ -118,5 +124,15 @@ public struct SessionStore: Sendable {
 
     private func mostUrgent(_ subset: [String: Entry]) -> SessionState? {
         subset.values.map(\.state).max { $0.urgency < $1.urgency }
+    }
+}
+
+extension ClaudeStatus.Phase {
+    var state: SessionState {
+        switch self {
+        case .busy:    .working
+        case .waiting: .needsYou
+        case .idle:    .done
+        }
     }
 }

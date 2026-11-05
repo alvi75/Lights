@@ -30,12 +30,15 @@ public enum Light: String, Sendable {
 /// A state report from a hook. Raw names match the hook arguments and the old URL paths.
 public enum Signal: Equatable, Sendable {
     case set(SessionState)
+    /// The turn ended on an API error (usage limit, out of credit, auth, overloaded): needs you.
+    case failed
     case end
 
     public init?(_ raw: String) {
         switch raw {
         case "executing":           self = .set(.working)
-        case "permission", "error": self = .set(.needsYou)
+        case "permission":          self = .set(.needsYou)
+        case "error":               self = .failed
         case "idle":                self = .set(.done)
         case "end", "off":          self = .end
         default:                    return nil
