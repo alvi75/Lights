@@ -75,11 +75,19 @@ To have Claude Code running on a server light up the tab you ssh'd from:
 
 macOS `ssh` forwards `LC_*` variables by default, and most Linux servers accept them (`AcceptEnv LANG LC_*`). If a server doesn't accept them, the light still works, but it can't tell that server's sessions apart by tab.
 
-What the server needs: `sh`, `curl`, and Claude Code installed for your account (Lights looks for `~/.claude` or `claude` on the PATH). Any number of servers is fine, including ones that share a home directory. Your machine list lives in the app's preferences on your Mac, and the token in `~/.lights/auth` is made on your Mac at first launch, so nothing about your machines or logins is in this repo or in the app. **Remove** next to a machine takes the hooks and `~/.lights` off the server again and stops its tunnel.
+What the server needs: `sh` with the usual tools (`ps`, `od`, `grep`, `sed`, `hostname`, and `ss` or `netstat`), `curl`, an sshd that allows remote port forwarding (`AllowTcpForwarding`), and Claude Code for your account (a `~/.claude` folder or `claude` on the PATH counts). Lights doesn't check for `curl`: without it **Add** still succeeds, but the light never changes and the machine stays on "connecting".
+
+Any number of servers is fine from one Mac, including ones that share a home directory, as long as their short hostnames differ. One server account can serve one Mac: a second Mac's **Add** replaces the token, and the first Mac's reports get rejected until it adds the machine again.
+
+Your machine list lives in the app's preferences on your Mac, and the token in `~/.lights/auth` is made on your Mac at first launch, so nothing about your machines or logins is in this repo or in the app.
+
+**Remove** next to a machine stops its tunnel and drops it from the list, then takes the Lights hooks and `~/.lights` off the server. If the server can't be reached they stay there; clear them by hand with `rm -r ~/.lights` and **Uninstall** in a Claude Code on that server. On servers that share a home, removing one takes them off the others too, until Lights next starts.
+
+The tab line goes into `~/.zshrc`, and into `~/.bashrc` / `~/.bash_profile` if they exist. Other shells, and tmux, aren't covered.
 
 ### Any other tool
 
-Anything that can run a command when it starts, stops or needs you can drive the light. Have it run `~/.lights/hook.sh <state>` with one of `executing`, `permission`, `idle`, `error` or `end`. The script finds your tab, adds the token and reports to the app, and on an SSH machine it sends through the tunnel. Or call the HTTP route below yourself.
+Anything that can run a command when it starts, stops or needs you can drive the light. Have it run `~/.lights/hook.sh <state>` with one of `executing`, `permission`, `idle`, `error` or `end`. The script appears once you've clicked **Install** for Claude Code or Codex. It works out your tab from the terminal the tool runs in, adds the token and reports to the app; on an SSH machine it sends through the tunnel, using the tab in `LC_LIGHTS_TAB`. A tool started outside any terminal reports with no tab, and that report shows in whichever followed tab has none of its own. If the tool sets `CLAUDE_PROJECT_DIR`, it must close the hook's stdin, or the hook waits for it. Or call the HTTP route below yourself.
 
 ### Usage
 
