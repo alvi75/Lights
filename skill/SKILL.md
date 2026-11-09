@@ -39,7 +39,7 @@ test -x ~/.lights/hook.sh && test -r ~/.lights/auth && echo ready
 curl -s -H @$HOME/.lights/auth http://127.0.0.1:9876/status
 ```
 
-The first command should print 8, the second `ready`. The status shows the
+The first command should print 9, the second `ready`. The status shows the
 followed tab: `working` while Claude is busy, `done` after a reply,
 `needs-you` at a permission prompt.
 

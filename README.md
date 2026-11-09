@@ -75,6 +75,12 @@ To have Claude Code running on a server light up the tab you ssh'd from:
 
 macOS `ssh` forwards `LC_*` variables by default, and most Linux servers accept them (`AcceptEnv LANG LC_*`). If a server doesn't accept them, the light still works, but it can't tell that server's sessions apart by tab.
 
+What the server needs: `sh`, `curl`, and Claude Code installed for your account (Lights looks for `~/.claude` or `claude` on the PATH). Any number of servers is fine, including ones that share a home directory. Your machine list lives in the app's preferences on your Mac, and the token in `~/.lights/auth` is made on your Mac at first launch, so nothing about your machines or logins is in this repo or in the app. **Remove** next to a machine takes the hooks and `~/.lights` off the server again and stops its tunnel.
+
+### Any other tool
+
+Anything that can run a command when it starts, stops or needs you can drive the light. Have it run `~/.lights/hook.sh <state>` with one of `executing`, `permission`, `idle`, `error` or `end`. The script finds your tab, adds the token and reports to the app, and on an SSH machine it sends through the tunnel. Or call the HTTP route below yourself.
+
 ### Usage
 
 | Action | How |
