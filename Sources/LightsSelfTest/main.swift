@@ -153,6 +153,14 @@ do {
     check(ClaudeStatus.parse(Data(#"{"pid":1,"sessionId":"a","status":"idle"}"#.utf8)) == nil, "status without a time ignored")
     check(ClaudeStatus.parse(Data(#"{"pid":1,"sessionId":"../x","status":"idle","statusUpdatedAt":1}"#.utf8)) == nil, "odd session id ignored")
     check(ClaudeStatus.parse(Data("not json".utf8)) == nil, "broken file ignored")
+    let bg = #"{"pid":6669,"sessionId":"b31f067d-0779-4267-aace-16ab736146a4","kind":"bg","jobId":"b31f067d","status":"busy","statusUpdatedAt":1794242145628}"#
+    check(ClaudeStatus.parse(Data(bg.utf8))?.jobId == "b31f067d", "a background job's id read")
+    let moved = #"{"pid":34473,"sessionId":"4b3b6a61-3935-4fbc-b386-f9b685c2ff36","status":"idle","statusUpdatedAt":1793826819967,"parkedJobId":"b31f067d"}"#
+    check(ClaudeStatus.parse(Data(moved.utf8))?.parkedJobId == "b31f067d", "the job a session moved into read")
+    check(ClaudeStatus.parse(Data(#"{"pid":1,"sessionId":"a","status":"idle","statusUpdatedAt":1,"parkedJobId":"../x"}"#.utf8))?.parkedJobId == nil, "odd job id dropped")
+    let shell = #"{"pid":34473,"sessionId":"4b3b6a61-3935-4fbc-b386-f9b685c2ff36","status":"shell","statusUpdatedAt":1793826819967,"parkedJobId":"b31f067d"}"#
+    check(ClaudeStatus.parse(Data(shell.utf8))?.phase == .shell, "a session at the ! shell prompt is read, not dropped")
+    check(ClaudeStatus.parse(Data(shell.utf8))?.parkedJobId == "b31f067d", "and keeps the job it moved into")
 }
 
 // MARK: - Checking hook states against Claude Code's status
@@ -231,6 +239,70 @@ do {
     check(remote.state(of: SessionStore.unknownTab) == .needsYou, "a tabless report stays while ssh is open")
     remote.reconcile(with: TabActivity(live: [], claude: [:]), statuses: [], at: at(2))
     check(remote.state(of: SessionStore.unknownTab) == nil, "and goes once no tab runs ssh")
+
+    // A session moved to the background keeps working under a pty of its own (Claude Code's
+    // bg-pty-host); the Terminal tab it left shows that job's light.
+    var parked = SessionStore()
+    let twoTabs = TabActivity(live: ["ttys001", "ttys003"], claude: ["ttys001": [34473], "ttys003": [6669]], pids: [34473, 6669])
+    let interactive = ClaudeStatus(pid: 34473, sessionId: "s1", phase: .idle, since: at(-100), parkedJobId: "j1")
+    let job = ClaudeStatus(pid: 6669, sessionId: "s2", phase: .busy, since: at(-50), jobId: "j1")
+    parked.reconcile(with: twoTabs, statuses: [interactive, job], at: t0)
+    check(parked.state(of: "ttys001") == .working, "a tab whose session moved to the background shows the job working")
+    parked.apply(.failed, tab: "ttys003", at: at(1))
+    parked.reconcile(with: twoTabs, statuses: [interactive, job], at: at(2))
+    check(parked.state(of: "ttys001") == .needsYou, "the job's hooks land on its own pty and count for the tab")
+    let jobIdle = ClaudeStatus(pid: 6669, sessionId: "s2", phase: .idle, since: at(3), jobId: "j1")
+    parked.reconcile(with: twoTabs, statuses: [interactive, jobIdle], at: at(4))
+    check(parked.state(of: "ttys001") == .needsYou, "an API error in the job stays red when it goes idle")
+    let jobBusy = ClaudeStatus(pid: 6669, sessionId: "s2", phase: .busy, since: at(5), jobId: "j1")
+    parked.reconcile(with: twoTabs, statuses: [interactive, jobBusy], at: at(6))
+    check(parked.state(of: "ttys001") == .working, "and works again")
+    let jobWaiting = ClaudeStatus(pid: 6669, sessionId: "s2", phase: .waiting, since: at(7), jobId: "j1")
+    parked.reconcile(with: twoTabs, statuses: [interactive, jobWaiting], at: at(8))
+    check(parked.state(of: "ttys001") == .needsYou, "a prompt in the job turns the tab red")
+    let resumed = ClaudeStatus(pid: 34473, sessionId: "s1", phase: .busy, since: at(9))
+    parked.reconcile(with: twoTabs, statuses: [resumed, jobWaiting], at: at(10))
+    check(parked.state(of: "ttys001") == .working, "once the tab takes its session back, its own status counts again")
+    let atShell = ClaudeStatus(pid: 34473, sessionId: "s1", phase: .shell, since: at(11), parkedJobId: "j1")
+    let jobBusyAgain = ClaudeStatus(pid: 6669, sessionId: "s2", phase: .busy, since: at(11), jobId: "j1")
+    parked.reconcile(with: twoTabs, statuses: [atShell, jobBusyAgain], at: at(12))
+    check(parked.state(of: "ttys001") == .working, "a parked tab at the ! shell prompt still follows its job")
+    var shellTab = SessionStore()
+    shellTab.apply(.set(.working), tab: "ttys001", at: t0)
+    shellTab.reconcile(with: tab, statuses: status(.shell, 2), at: at(3))
+    check(shellTab.state(of: "ttys001") == .done, "running a ! shell command at the prompt shows green")
+
+    // A job that dies mid-turn (crash, kill) takes its light with it; the tab goes back to its own status.
+    var died = SessionStore()
+    died.reconcile(with: twoTabs, statuses: [interactive, job], at: t0)
+    check(died.state(of: "ttys001") == .working, "following the job")
+    died.retain(liveTabs: ["ttys001"])
+    died.reconcile(with: TabActivity(live: ["ttys001"], claude: ["ttys001": [34473]], pids: [34473]), statuses: [interactive], at: at(1))
+    check(died.state(of: "ttys001") == .done, "a job that vanished mid-turn doesn't leave the tab yellow")
+
+    // Taking the session back with an unchanged status file still drops the job's light.
+    var back = SessionStore()
+    back.reconcile(with: twoTabs, statuses: [interactive, jobWaiting], at: t0)
+    check(back.state(of: "ttys001") == .needsYou, "following the job's prompt")
+    let own = ClaudeStatus(pid: 34473, sessionId: "s1", phase: .idle, since: at(-100))
+    back.reconcile(with: twoTabs, statuses: [own, jobWaiting], at: at(1))
+    check(back.state(of: "ttys001") == .done, "once the tab takes its session back the job's red goes with it")
+
+    // Two status files can share a job id (a stale file whose pid came back); the newest wins.
+    var twins = SessionStore()
+    let stale = ClaudeStatus(pid: 7000, sessionId: "s3", phase: .waiting, since: at(-900), jobId: "j1")
+    let both = TabActivity(live: ["ttys001", "ttys003"], claude: ["ttys001": [34473], "ttys003": [6669]], pids: [34473, 6669, 7000])
+    twins.reconcile(with: both, statuses: [interactive, stale, job], at: t0)
+    check(twins.state(of: "ttys001") == .working, "of two records with one job id, the newer counts")
+    var twinsFlipped = SessionStore()
+    twinsFlipped.reconcile(with: both, statuses: [interactive, job, stale], at: t0)
+    check(twinsFlipped.state(of: "ttys001") == .working, "whatever order the files come in")
+
+    // The job's pty may be missing from ps (no tty); the status file still drives the tab.
+    var noPty = SessionStore()
+    let oneTab = TabActivity(live: ["ttys001"], claude: ["ttys001": [34473]], pids: [34473, 6669])
+    noPty.reconcile(with: oneTab, statuses: [interactive, job], at: t0)
+    check(noPty.state(of: "ttys001") == .working, "a background job without a visible pty still lights the tab")
 }
 
 // MARK: - Redrawing the light

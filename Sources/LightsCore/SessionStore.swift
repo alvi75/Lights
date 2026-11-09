@@ -29,6 +29,8 @@ public struct SessionStore: Sendable {
     private var known: Set<String> = []
     /// Claude Code session id each tab's hooks reported.
     private var sessions: [String: String] = [:]
+    /// Tabs showing a background job's light, as of the last check.
+    private var followingJob: Set<String> = []
 
     public init() {}
 
@@ -77,9 +79,18 @@ public struct SessionStore: Sendable {
     /// after it restarts, get their state the same way.
     public mutating func reconcile(with activity: TabActivity, statuses: [ClaudeStatus], at now: Date = Date()) {
         let running = statuses.filter { activity.pids.contains($0.pid) }
-        func status(of tab: String) -> ClaudeStatus? {
+        func ownStatus(of tab: String) -> ClaudeStatus? {
             running.filter { activity.claude[tab]?.contains($0.pid) == true || $0.sessionId == sessions[tab] }
                 .max { $0.since < $1.since }
+        }
+        // A session moved to the background goes on working as a job under a pty of its
+        // own, while the process left in the tab sits idle. The tab follows the job.
+        func job(behind tab: String) -> ClaudeStatus? {
+            guard let parked = ownStatus(of: tab)?.parkedJobId else { return nil }
+            return running.filter { $0.jobId == parked }.max { $0.since < $1.since }
+        }
+        func status(of tab: String) -> ClaudeStatus? {
+            job(behind: tab) ?? ownStatus(of: tab)
         }
         for tab in Set(activity.claude.keys).subtracting(known) {
             entries[tab] = Entry(state: status(of: tab)?.phase.state ?? .done, since: now)
@@ -89,9 +100,24 @@ public struct SessionStore: Sendable {
         if activity.ssh.isEmpty {
             entries[Self.unknownTab] = nil
         }
+        // A tab that took its session back, or whose job died, starts over from its own status:
+        // the job's light would otherwise outlive the job, since the file's time doesn't move.
+        let nowFollowing = Set(entries.keys.filter { job(behind: $0) != nil })
+        for tab in followingJob.subtracting(nowFollowing) where entries[tab] != nil {
+            entries[tab] = Entry(state: ownStatus(of: tab)?.phase.state ?? .done, since: now)
+        }
+        followingJob = nowFollowing
         entries = Dictionary(uniqueKeysWithValues: entries.map { tab, entry in
             (tab, status(of: tab).map { Self.checked(entry, against: $0, at: now) } ?? entry)
         })
+        // The job's hooks (an API error among them) report under its pty; show them in the tab.
+        let followed = entries.keys.compactMap { tab -> (String, Entry)? in
+            guard let job = job(behind: tab),
+                  let pty = activity.claude.first(where: { $0.value.contains(job.pid) })?.key,
+                  pty != tab, let jobEntry = entries[pty] else { return nil }
+            return (tab, jobEntry)
+        }
+        for (tab, entry) in followed { entries[tab] = entry }
     }
 
     private static func checked(_ entry: Entry, against status: ClaudeStatus, at now: Date) -> Entry {
@@ -103,7 +129,7 @@ public struct SessionStore: Sendable {
             return entry    // a hook reported after this change
         case .busy:
             return entry.state == .working ? entry : Entry(state: .working, since: now)
-        case .idle:
+        case .idle, .shell:
             return entry.state == .done || entry.isError ? entry : Entry(state: .done, since: now)
         }
     }
@@ -130,9 +156,9 @@ public struct SessionStore: Sendable {
 extension ClaudeStatus.Phase {
     var state: SessionState {
         switch self {
-        case .busy:    .working
-        case .waiting: .needsYou
-        case .idle:    .done
+        case .busy:           .working
+        case .waiting:        .needsYou
+        case .idle, .shell:   .done
         }
     }
 }

@@ -118,13 +118,14 @@ Some moments fire no hook at all: pressing Esc, answering "no" to a permission p
 - Esc, "no" and a finished turn turn it green; an approval turns it yellow; an open prompt turns it red, a few seconds before the hook would.
 - A report that came after the status changed wins, so a prompt you just sent isn't undone.
 - A turn that ended on an API error stays red until the session works again.
+- A session you moved to the background keeps running as a job under a pty of its own, while the process left in your tab sits idle. The tab shows the job's light, hooks and status alike, until it takes its session back.
 - Terminal and iTerm2 tabs are matched to Claude Code by process; VS Code terminals on this Mac by the session id the hook passes.
 - After Lights restarts, sessions it hasn't heard from get their state the same way, instead of staying off.
 
 ### Known limitations
 
-- The status check needs a Claude Code that writes `~/.claude/sessions/` (2.1.317 and 2.1.318 do) and the default config folder. Without it the light goes by hooks alone, and Esc leaves it yellow.
-- Sessions over SSH and Codex sessions go by their hooks alone.
+- The status check needs a Claude Code that writes `~/.claude/sessions/` (2.1.317 and later do) and the default config folder. Without it the light goes by hooks alone, and Esc leaves it yellow.
+- Sessions over SSH and Codex sessions go by their hooks alone. A session moved to the background on an SSH machine can't be followed: its job's hooks carry the tab name of whatever started Claude Code's daemon there, not of your tab.
 - Reports from a server that doesn't accept `LC_*` carry no tab. They are dropped once no tab runs `ssh`.
 - tmux: hooks report the pane's tty, not the Terminal tab's, so tabs running tmux aren't followed.
 - In VS Code, all Claude sessions share one light (the most urgent wins).
